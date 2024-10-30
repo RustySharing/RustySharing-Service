@@ -4,7 +4,6 @@ use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 
 // Import your encode_image function
 
-mod image_encoder;
 use rpc_service::image_encoder::encode_image;
 
 // This module is generated from your .proto file
