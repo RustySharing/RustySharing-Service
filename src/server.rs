@@ -3,7 +3,6 @@ use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 
 // Import your encode_image function
-
 use rpc_service::image_encoder::encode_image;
 
 // This module is generated from your .proto file
@@ -25,9 +24,13 @@ impl ImageEncoder for ImageEncoderService {
 
         // Get the image data from the request
         let image_data = &request.image_data; // Assuming image_data is passed as bytes
+        
+
+        // image_data to DynamicImage
+        let img = image::load_from_memory(image_data).expect("Failed to load image");
 
         // Call the encode_image function with the provided image data
-        let encoded_image = match encode_image(image_data) { // Adjusted to use the image_data directly
+        let encoded_image = match encode_image(img) { // Dereference the reference to the byte slice
             Ok(encoded_data) => encoded_data,
             Err(e) => {
                 eprintln!("Error encoding image: {}", e);

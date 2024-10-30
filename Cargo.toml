@@ -10,21 +10,21 @@ edition = "2021"
 tonic-build = "0.12.3"
 
 [dependencies]
+# Grpc implementation
+tonic = "0.12.3"
 gtk = { version = "0.9.2", package = "gtk4", features = ["v4_12"] }
+image = "0.21.3"
 # Protocol buffer implementation
 
 prost = "0.13.3"
+serde = {version = "1.0.214", features = ["derive"]}
+serde_json = "1.0.132"
 tokio = {version = "1.41.0", features=["macros","rt-multi-thread"]}
+regex = "1.11.1"
+steganography = "1.0.2"
 
-# Grpc implementation
-tonic = "0.12.3"
 
 
 [[bin]]
 name = "rpc_service"
 path = "src/server.rs"
-image = "0.21.3"
-regex = "1.11.1"
-serde = {version = "1.0.213", features = ["derive"]}
-serde_json = "1.0.132"
-steganography = "1.0.2"
