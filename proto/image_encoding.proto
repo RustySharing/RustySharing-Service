@@ -6,13 +6,13 @@ service ImageEncoder {
 }
 
 message EncodedImageRequest {
-  int width = 1;
-  int height = 2;
+  int32 width = 1;
+  int32 height = 2;
   bytes image_data = 3;
 }
 
 message EncodedImageResponse {
-  int width = 1;
-  int height = 2;
+  int32 width = 1;
+  int32 height = 2;
   bytes image_data = 3;
 }
