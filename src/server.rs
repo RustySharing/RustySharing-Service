@@ -17,7 +17,10 @@ impl Hello for HelloService {
     request: Request<HelloRequest>
   ) -> Result<Response<HelloResponse>, Status> {
     let request = request.into_inner();
-    println!("Got a request: {:?}", request);
+    println!("Got a request: {:?}", request); 
+
+    //image encode 
+    //then send in reply
 
     let reply = hello::HelloResponse {
       message: format!("Acknowledged:: {}!", request.name),

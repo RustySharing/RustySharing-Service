@@ -1,0 +1,18 @@
+syntax = "proto3";
+package image_encoding;
+
+service ImageEncoder {
+  rpc ImageEncode (EncodedImageRequest) returns (EncodedImageResponse);
+}
+
+message EncodedImageRequest {
+  int width = 1;
+  int height = 2;
+  bytes image_data = 3;
+}
+
+message EncodedImageResponse {
+  int width = 1;
+  int height = 2;
+  bytes image_data = 3;
+}
