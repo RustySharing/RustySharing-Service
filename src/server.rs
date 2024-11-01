@@ -31,28 +31,28 @@ impl ImageEncoder for ImageEncoderService {
         let img = image::load_from_memory(&image_data)
             .map_err(|_| Status::internal("Failed to load image"))?;
 
-        //Call the encode_image function with the provided image data
-        let encoded_image = match encode_image(img) { // Dereference the reference to the byte slice
-            Ok(encoded_data) => encoded_data,
-            Err(e) => {
-                eprintln!("Error encoding image: {}", e);
-                return Err(Status::internal("Image encoding failed"));
-            },
-        };
+        // //Call the encode_image function with the provided image data
+        // let encoded_image = match encode_image(img) { // Dereference the reference to the byte slice
+        //     Ok(encoded_data) => encoded_data,
+        //     Err(e) => {
+        //         eprintln!("Error encoding image: {}", e);
+        //         return Err(Status::internal("Image encoding failed"));
+        //     },
+        // };
 
-        let encoded_photo = image::load_from_memory(&image_data)
-            .map_err(|_| Status::internal("Failed to load image"))?;
+        // let encoded_photo = image::load_from_memory(&image_data)
+        //     .map_err(|_| Status::internal("Failed to load image"))?;
 
         // Step 2: Save the image to a file
-        let output_path = "output_image.jpeg"; // Specify your output file name
-        encoded_photo.save(output_path)
+        let output_path = "output_image.png"; // Specify your output file name
+        img.save(output_path)
             .map_err(|_| Status::internal("Failed to save image"))?;
 
         // Construct the response with the encoded image data
         let reply = EncodedImageResponse {
             width: request.width,
             height: request.height,
-            image_data: encoded_image,
+            image_data: image_data.clone(),
         };
 
         Ok(Response::new(reply))

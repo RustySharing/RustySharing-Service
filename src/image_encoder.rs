@@ -34,9 +34,9 @@ pub fn encode_image(img: DynamicImage) -> Result<Vec<u8>, Box<dyn Error>> {
   let combined_data: Vec<u8> = [json_data.clone(), img_in_bytes].concat();
 
   // Check if combined data length exceeds image data capacity
-  // if combined_data.len() > img_in_bytes_len {
-  //   return Err("Combined data length exceeds image data capacity".into());
-  // }
+  if combined_data.len() > img_in_bytes_len {
+    return Err("Combined data length exceeds image data capacity".into());
+  }
 
   // Step 3: Encode JSON data into the image
   let my_encoder = encoder::Encoder::new(&combined_data, image::ImageRgba8(low_res_img.clone()));
