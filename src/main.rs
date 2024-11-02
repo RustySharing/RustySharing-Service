@@ -60,7 +60,7 @@ use std::error::Error as StdError;
 pub fn encode_image(
     img: Vec<u8>,
 ) -> Result<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, Box<dyn StdError + Send>> {
-    print!("Started Encoding!");
+    println!("Started Encoding!");
 
     let dynamic_image =
         image::load_from_memory(&img).expect("Failed to convert bytes to DynamicImage");
@@ -70,7 +70,7 @@ pub fn encode_image(
     // Calculate new dimensions while maintaining aspect ratio
 
     let blurred_img = imageops::blur(&dynamic_image, 20.0);
-    print!("Generated blured");
+    println!("Generated blured");
 
     // Prepare JSON data to embed
     let data = EmbeddedData {
@@ -97,7 +97,7 @@ pub fn encode_image(
     // Step 3: Encode JSON data into the image
     let my_encoder = encoder::Encoder::new(&combined_data, ImageRgba8(resized_blurred_img.clone()));
     let encoded_img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = my_encoder.encode_alpha();
-    print!("Done!");
+    println!("Done!");
 
     // Return the encoded image data if successful
     Ok(encoded_img)
@@ -105,7 +105,7 @@ pub fn encode_image(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError + Send>> {
-    let server_list = vec!["10.7.16.54".to_string(), "10.7.17.128".to_string()];
+    let server_list = ["10.7.16.54".to_string(), "10.7.17.128".to_string()];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
@@ -195,9 +195,9 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                 println!("Assigned port {} to client {}", handler_port, client_addr);
 
                 // Spawn a new task to handle the image transfer on the new port
-                let client_addr_clone = client_addr.clone();
+                let client_addr_clone = client_addr;
                 task::spawn(async move {
-                    handle_image_transfer(handler_socket, client_addr_clone).await;
+                    let _ = handle_image_transfer(handler_socket, client_addr_clone).await;
                 });
 
                 // Release the talking stick and pass it to the next server
@@ -271,13 +271,13 @@ async fn handle_image_transfer(
 
     // Save the received image to a temporary file
     let encoded_image_result = encode_image(image_data.clone());
-    let mut encoded_bytes: Vec<u8> = Vec::new();
+    // let mut encoded_bytes: Vec<u8> = Vec::new();
 
     match encoded_image_result {
         Ok(encoded_image) => {
             // Convert ImageBuffer to Vec<u8>
-            encoded_image.save("temp_image.jpeg");
-            encoded_bytes = encoded_image.clone().into_raw(); // If using clone, ensure you handle ownership correctly
+            let _ = encoded_image.save("temp_image.jpeg");
+            //encoded_bytes = encoded_image.clone().into_raw(); // If using clone, ensure you handle ownership correctly
         }
         Err(e) => {
             eprintln!("Error encoding image: {}", e);
@@ -292,15 +292,15 @@ async fn handle_image_transfer(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
     let max_packet_size = 1022;
-    let mut packet_number: u16 = 0;
+    //let mut packet_number: u16 = 0;
 
-    for chunk in image_data.chunks(max_packet_size) {
+    for (packet_number, chunk) in (0_u16..).zip(image_data.chunks(max_packet_size)) {
         let mut packet = Vec::with_capacity(2 + chunk.len());
         packet.extend_from_slice(&packet_number.to_be_bytes());
         packet.extend_from_slice(chunk);
 
         loop {
-            socket.send_to(&packet, client_addr).await;
+            let _ = socket.send_to(&packet, client_addr).await;
             println!("Sent packet {}", packet_number);
 
             let mut ack_buf = [0; 2];
@@ -326,11 +326,11 @@ async fn handle_image_transfer(
             }
         }
 
-        packet_number += 1;
+        //packet_number += 1;
     }
 
     let terminator = [255, 255];
-    socket.send_to(&terminator, client_addr).await;
+    let _ = socket.send_to(&terminator, client_addr).await;
     println!("Image sent back to client.");
 
     Ok(())
