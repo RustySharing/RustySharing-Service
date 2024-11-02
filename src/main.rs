@@ -4,9 +4,12 @@ use serde_json::to_vec;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::io::{self, Read, Write};
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::str;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use steganography::encoder;
 use tokio::net::UdpSocket;
 use tokio::task;
@@ -105,43 +108,114 @@ pub fn encode_image(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError + Send>> {
-    let main_socket = UdpSocket::bind("127.0.0.1:8080")
+    let server_list = vec!["10.7.16.54".to_string(), "10.7.17.128".to_string()];
+
+    let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
+    let multicast_port = 9001;
+    let my_addr = "10.7.17.128"; // Replace with this server's IP address
+
+    let local_socket = "0.0.0.0:9001"; // Bind to all interfaces on port 9001
+
+    // Create and bind the UDP socket
+    let socket = UdpSocket::bind(local_socket)
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
-    println!("Main server listening on 127.0.0.1:8080");
+    println!("Server bound to {}", local_socket);
 
-    let port_counter = Arc::new(Mutex::new(8081));
+    // Join the multicast group on the specified local interface
+    socket.join_multicast_v4(multicast_addr, my_addr.parse::<Ipv4Addr>().unwrap())?;
+    println!(
+        "Server joined multicast group {} on interface {}",
+        multicast_addr, my_addr
+    );
+
+    // Initialize the talking stick status (true if this server should start with the talking stick)
+    let my_index = server_list.iter().position(|x| x == my_addr).unwrap();
+    let next_server_addr = &server_list[(my_index + 1) % server_list.len()];
+    let has_token = Arc::new(Mutex::new(my_index == 0));
 
     loop {
         let mut buf = [0; 1024];
-        let (len, addr) = main_socket
+        println!("Waiting to receive data...");
+        let (len, client_addr) = socket
             .recv_from(&mut buf)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
-        if len > 0 && buf[0] == 1 {
-            // Assume 1 is the "send request" signal
-            let new_port = {
-                let mut counter = port_counter.lock().unwrap();
-                let port = *counter;
-                *counter += 1;
-                port
-            };
+        // Log that data was received
+        println!("Received packet of length {} from {}", len, client_addr);
 
-            // Send the new port number to the client
-            let new_port_bytes = (new_port as u16).to_be_bytes();
-            main_socket
-                .send_to(&new_port_bytes, addr)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
-            println!("Assigned new port {} to client {}", new_port, addr);
+        // Print talking stick status for debugging
+        {
+            let has_token = has_token.lock().unwrap();
+            if *has_token {
+                println!(
+                    "Server {} has the talking stick and received a request from {}",
+                    my_addr, client_addr
+                );
+            } else {
+                println!(
+                    "Server {} does NOT have the talking stick but received a request from {}",
+                    my_addr, client_addr
+                );
+            }
+        }
 
-            // Spawn a new task to handle the image transfer on the new port
-            let handler_port = format!("127.0.0.1:{}", new_port);
-            let handler_socket = UdpSocket::bind(&handler_port)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
-            task::spawn(handle_image_transfer(handler_socket, addr));
+        if len == 1 && buf[0] == 99 {
+            // Token received from the previous server
+            let mut token = has_token.lock().unwrap();
+            *token = true;
+            println!("Server {} received the talking stick", my_addr);
+            continue;
+        }
+
+        if *has_token.lock().unwrap() {
+            // Server has the talking stick and should proceed to handle the request
+            if len > 0 && buf[0] == 1 {
+                // Generate a new port for this client and create a handler
+                let handler_port = 10000 + rand::random::<u16>() % 1000;
+                let handler_socket =
+                    UdpSocket::bind((my_addr.parse::<Ipv4Addr>().unwrap(), handler_port)).await?;
+
+                // Construct the 6-byte response (4 bytes for IP, 2 bytes for port)
+                let ip_bytes = my_addr.parse::<Ipv4Addr>().unwrap().octets();
+                let port_bytes = (handler_port as u16).to_be_bytes();
+                let mut response = Vec::new();
+                response.extend_from_slice(&ip_bytes);
+                response.extend_from_slice(&port_bytes);
+
+                // Send the 6-byte response to the client
+                println!("Sending response to client: {:?}", response);
+                socket
+                    .send_to(&response, client_addr)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+
+                println!("Assigned port {} to client {}", handler_port, client_addr);
+
+                // Spawn a new task to handle the image transfer on the new port
+                let client_addr_clone = client_addr.clone();
+                task::spawn(async move {
+                    handle_image_transfer(handler_socket, client_addr_clone).await;
+                });
+
+                // Release the talking stick and pass it to the next server
+                let mut token = has_token.lock().unwrap();
+                *token = false;
+                socket
+                    .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
+                    .await?;
+                println!(
+                    "Server {} passed the talking stick to {}",
+                    my_addr, next_server_addr
+                );
+            }
+        } else {
+            // Ignore the request if we don't have the talking stick
+            println!(
+                "Server {} received a request but does not have the talking stick; ignoring.",
+                my_addr
+            );
         }
     }
 }
@@ -149,7 +223,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 // Handler function to manage the image transfer on a new port
 async fn handle_image_transfer(
     socket: UdpSocket,
-    client_addr: SocketAddr,
+    client_addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn StdError + Send>> {
     match socket.local_addr() {
         Ok(addr) => println!("Started image transfer handler on {}", addr),
@@ -253,7 +327,6 @@ async fn handle_image_transfer(
         packet_number += 1;
     }
 
-    // Send end-of-transmission signal
     let terminator = [255, 255];
     socket.send_to(&terminator, client_addr).await;
     println!("Image sent back to client.");
