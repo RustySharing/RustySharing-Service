@@ -80,9 +80,17 @@ pub fn encode_image(
 
     // Serialize JSON data to bytes
     let json_data = to_vec(&data).expect("Failed to serialize JSON data");
+    println!("Serialized JSON: {}", String::from_utf8_lossy(&json_data));
+
+    let img_len = img.len();
 
     // Combine JSON data and original image bytes, ensuring the JSON data is at the beginning
     let combined_data: Vec<u8> = [json_data.clone(), img].concat();
+
+    println!("JSON length: {}", json_data.len());
+    println!("Image length: {}", img_len);
+    println!("Combined data length: {}", combined_data.len());
+
     let aspect_ratio = calculate_aspect_ratio(orig_width, orig_height);
     let (new_width, new_height) =
         calculate_image_dimensions_from_data(combined_data.len(), 1, aspect_ratio);
