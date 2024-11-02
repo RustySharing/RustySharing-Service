@@ -1,4 +1,5 @@
 use image::{imageops, DynamicImage::ImageRgba8, GenericImageView};
+use image::{ImageBuffer, Rgba};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
 use std::collections::HashMap;
@@ -59,7 +60,7 @@ use std::error::Error as StdError;
 
 pub fn encode_image(
     img: Vec<u8>,
-) -> Result<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, Box<dyn StdError + Send>> {
+) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>, Box<dyn StdError + Send>> {
     println!("Started Encoding!");
 
     let dynamic_image =
@@ -67,10 +68,9 @@ pub fn encode_image(
 
     let (orig_width, orig_height) = dynamic_image.dimensions();
 
-    // Calculate new dimensions while maintaining aspect ratio
-
+    // Apply a blur to the image
     let blurred_img = imageops::blur(&dynamic_image, 20.0);
-    println!("Generated blured");
+    println!("Generated blurred image");
 
     // Prepare JSON data to embed
     let data = EmbeddedData {
@@ -81,11 +81,12 @@ pub fn encode_image(
     // Serialize JSON data to bytes
     let json_data = to_vec(&data).expect("Failed to serialize JSON data");
 
-    // Combine JSON data and original image bytes
+    // Combine JSON data and original image bytes, ensuring the JSON data is at the beginning
     let combined_data: Vec<u8> = [json_data.clone(), img].concat();
     let aspect_ratio = calculate_aspect_ratio(orig_width, orig_height);
     let (new_width, new_height) =
         calculate_image_dimensions_from_data(combined_data.len(), 1, aspect_ratio);
+
     let resized_blurred_img = imageops::resize(
         &blurred_img,
         new_width,
@@ -96,7 +97,7 @@ pub fn encode_image(
     print!("Encoding ...");
     // Step 3: Encode JSON data into the image
     let my_encoder = encoder::Encoder::new(&combined_data, ImageRgba8(resized_blurred_img.clone()));
-    let encoded_img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = my_encoder.encode_alpha();
+    let encoded_img: ImageBuffer<Rgba<u8>, Vec<u8>> = my_encoder.encode_alpha();
     println!("Done!");
 
     // Return the encoded image data if successful
