@@ -8,7 +8,7 @@ use std::io::Read;
 use std::net::Ipv4Addr;
 use std::str;
 use std::sync::{Arc, Mutex};
-use steganography::encoder;
+use steganography::{decoder, encoder};
 use tokio::net::UdpSocket;
 use tokio::task;
 
@@ -61,6 +61,13 @@ use std::error::Error as StdError;
 pub fn encode_image(
     img: Vec<u8>,
 ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>, Box<dyn StdError + Send>> {
+    let img_path = "input.jpeg";
+    let mut original_img_bytes = Vec::new();
+    let mut original_file = File::open(img_path).expect("Failed to open original image file");
+    original_file
+        .read_to_end(&mut original_img_bytes)
+        .expect("Failed to read original image into bytes");
+
     println!("Started Encoding!");
 
     let dynamic_image =
@@ -85,7 +92,7 @@ pub fn encode_image(
     let img_len = img.len();
 
     // Combine JSON data and original image bytes, ensuring the JSON data is at the beginning
-    let combined_data: Vec<u8> = [json_data.clone(), img].concat();
+    let combined_data: Vec<u8> = [json_data.clone(), original_img_bytes].concat();
 
     println!("JSON length: {}", json_data.len());
     println!("Image length: {}", img_len);
@@ -292,6 +299,27 @@ async fn handle_image_transfer(
             eprintln!("Error encoding image: {}", e);
         }
     }
+    let output_path = "temp_image.jpeg";
+    let decoded_img = image::open(output_path).expect("Failed to open encoded image");
+    let my_decoder = decoder::Decoder::new(decoded_img.to_rgba());
+    let decoded_data = my_decoder.decode_alpha();
+
+    let start = decoded_data
+        .iter()
+        .position(|&b| b == b'{')
+        .expect("Opening brace not found");
+    let end = decoded_data
+        .iter()
+        .position(|&b| b == b'}')
+        .expect("Closing brace not found");
+
+    let json_part = &decoded_data[start..=end]; // Include the closing brace
+    let original_image_part = &decoded_data[end + 1..]; // Skip past the closing brace
+
+    let decoded_json: EmbeddedData =
+        serde_json::from_slice(json_part).expect("Failed to parse JSON data");
+
+    println!("Decoded Data: {:?}", decoded_json);
 
     // Step 2: Send the image back to the client
     let mut file = File::open("temp_image.jpeg")
