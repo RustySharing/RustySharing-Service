@@ -4,12 +4,9 @@ use serde_json::to_vec;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
-use std::net::SocketAddr;
 use std::str;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use steganography::encoder;
 use tokio::net::UdpSocket;
 use tokio::task;
@@ -112,7 +109,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
-    let my_addr = "10.7.17.128"; // Replace with this server's IP address
+    let my_addr = "10.7.16.54"; // Replace with this server's IP address
 
     let local_socket = "0.0.0.0:9001"; // Bind to all interfaces on port 9001
 
@@ -123,7 +120,9 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
     println!("Server bound to {}", local_socket);
 
     // Join the multicast group on the specified local interface
-    socket.join_multicast_v4(multicast_addr, my_addr.parse::<Ipv4Addr>().unwrap())?;
+    socket
+        .join_multicast_v4(multicast_addr, my_addr.parse::<Ipv4Addr>().unwrap())
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     println!(
         "Server joined multicast group {} on interface {}",
         multicast_addr, my_addr
@@ -175,7 +174,9 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                 // Generate a new port for this client and create a handler
                 let handler_port = 10000 + rand::random::<u16>() % 1000;
                 let handler_socket =
-                    UdpSocket::bind((my_addr.parse::<Ipv4Addr>().unwrap(), handler_port)).await?;
+                    UdpSocket::bind((my_addr.parse::<Ipv4Addr>().unwrap(), handler_port))
+                        .await
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
                 // Construct the 6-byte response (4 bytes for IP, 2 bytes for port)
                 let ip_bytes = my_addr.parse::<Ipv4Addr>().unwrap().octets();
@@ -204,7 +205,8 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                 *token = false;
                 socket
                     .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
-                    .await?;
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
                 println!(
                     "Server {} passed the talking stick to {}",
                     my_addr, next_server_addr
