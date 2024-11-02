@@ -271,6 +271,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derivative"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c6d883546668a3e2011b6a716a7330b82eabb0151b138217f632c8243e17135"
+dependencies = [
+ "proc-macro2 0.4.30",
+ "quote 0.6.13",
+ "syn 0.15.44",
+]
+
+[[package]]
 name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1001,6 +1012,7 @@ checksum = "80e04d1dcff3aae0704555fe5fee3bcfaf3d1fdf8a7e521d5b9d2b42acb52cec"
 dependencies = [
  "hermit-abi",
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.52.0",
 ]
@@ -1390,14 +1402,26 @@ dependencies = [
  "gtk4",
  "image",
  "local-ip",
+ "mio",
  "prost",
  "regex 1.11.1",
+ "rudp",
  "serde",
  "serde_json",
  "steganography",
  "tokio",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "rudp"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed0c971a826761847f6466cd1153464763c601f78b46fb02cba5418b1e2de023"
+dependencies = [
+ "byteorder",
+ "derivative",
 ]
 
 [[package]]
