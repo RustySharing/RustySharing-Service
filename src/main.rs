@@ -10,8 +10,8 @@ use std::net::Ipv4Addr;
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let server_list = vec![
+        "10.7.16.54".to_string(),
         "10.7.17.128".to_string(),
-        "10.7.18.50".to_string(),
     ];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
