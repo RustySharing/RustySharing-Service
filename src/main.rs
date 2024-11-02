@@ -1,14 +1,113 @@
+use image::{imageops, DynamicImage::ImageRgba8, GenericImageView};
+use serde::{Deserialize, Serialize};
+use serde_json::to_vec;
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Read;
 use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
+use std::str;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use steganography::encoder;
 use tokio::net::UdpSocket;
 use tokio::task;
 
+#[derive(Serialize, Deserialize, Debug)]
+struct EmbeddedData {
+    message: String,
+    timestamp: String,
+}
+
+fn calculate_image_dimensions_from_data(
+    data_size: usize,
+    bits_per_pixel: u32,
+    aspect_ratio: (u32, u32),
+) -> (u32, u32) {
+    // Calculate the total number of bits needed
+    let total_bits_needed = data_size * 8; // Convert bytes to bits
+
+    // Calculate the number of pixels needed
+    let pixels_needed = (total_bits_needed + bits_per_pixel as usize - 1) / bits_per_pixel as usize; // Round up
+
+    // Aspect ratio
+    let (aspect_width, aspect_height) = aspect_ratio;
+
+    // Calculate the total aspect ratio
+    let total_aspect = aspect_width as f32 / aspect_height as f32;
+
+    // Calculate width and height based on the aspect ratio
+    let height = (pixels_needed as f32 / total_aspect.sqrt()).sqrt().round() as u32;
+    let width = (height as f32 * total_aspect).round() as u32;
+
+    (width, height)
+}
+
+fn calculate_aspect_ratio(width: u32, height: u32) -> (u32, u32) {
+    // Calculate the greatest common divisor (GCD) using the Euclidean algorithm
+    fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+
+    let divisor = gcd(width, height);
+    (width / divisor, height / divisor)
+}
+
+use std::error::Error as StdError;
+
+pub fn encode_image(
+    img: Vec<u8>,
+) -> Result<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, Box<dyn StdError + Send>> {
+    print!("Started Encoding!");
+
+    let dynamic_image =
+        image::load_from_memory(&img).expect("Failed to convert bytes to DynamicImage");
+
+    let (orig_width, orig_height) = dynamic_image.dimensions();
+
+    // Calculate new dimensions while maintaining aspect ratio
+
+    let blurred_img = imageops::blur(&dynamic_image, 20.0);
+    print!("Generated blured");
+
+    // Prepare JSON data to embed
+    let data = EmbeddedData {
+        message: "Hello, steganography!".to_string(),
+        timestamp: "2024-10-27T00:00:00Z".to_string(),
+    };
+
+    // Serialize JSON data to bytes
+    let json_data = to_vec(&data).expect("Failed to serialize JSON data");
+
+    // Combine JSON data and original image bytes
+    let combined_data: Vec<u8> = [json_data.clone(), img].concat();
+    let aspect_ratio = calculate_aspect_ratio(orig_width, orig_height);
+    let (new_width, new_height) =
+        calculate_image_dimensions_from_data(combined_data.len(), 1, aspect_ratio);
+    let resized_blurred_img = imageops::resize(
+        &blurred_img,
+        new_width,
+        new_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    print!("Encoding ...");
+    // Step 3: Encode JSON data into the image
+    let my_encoder = encoder::Encoder::new(&combined_data, ImageRgba8(resized_blurred_img.clone()));
+    let encoded_img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = my_encoder.encode_alpha();
+    print!("Done!");
+
+    // Return the encoded image data if successful
+    Ok(encoded_img)
+}
+
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), Box<dyn StdError + Send>> {
     let server_list = vec!["10.7.16.54".to_string(), "10.7.17.128".to_string()];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
@@ -18,7 +117,9 @@ async fn main() -> io::Result<()> {
     let local_socket = "0.0.0.0:9001"; // Bind to all interfaces on port 9001
 
     // Create and bind the UDP socket
-    let socket = UdpSocket::bind(local_socket).await?;
+    let socket = UdpSocket::bind(local_socket)
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     println!("Server bound to {}", local_socket);
 
     // Join the multicast group on the specified local interface
@@ -36,7 +137,10 @@ async fn main() -> io::Result<()> {
     loop {
         let mut buf = [0; 1024];
         println!("Waiting to receive data...");
-        let (len, client_addr) = socket.recv_from(&mut buf).await?;
+        let (len, client_addr) = socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
         // Log that data was received
         println!("Received packet of length {} from {}", len, client_addr);
@@ -82,7 +186,10 @@ async fn main() -> io::Result<()> {
 
                 // Send the 6-byte response to the client
                 println!("Sending response to client: {:?}", response);
-                socket.send_to(&response, client_addr).await?;
+                socket
+                    .send_to(&response, client_addr)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
                 println!("Assigned port {} to client {}", handler_port, client_addr);
 
@@ -113,12 +220,15 @@ async fn main() -> io::Result<()> {
     }
 }
 
-// Function to handle image transfer on a unique port
+// Handler function to manage the image transfer on a new port
 async fn handle_image_transfer(
     socket: UdpSocket,
     client_addr: std::net::SocketAddr,
-) -> io::Result<()> {
-    println!("Image transfer handler started on {}", socket.local_addr()?);
+) -> Result<(), Box<dyn StdError + Send>> {
+    match socket.local_addr() {
+        Ok(addr) => println!("Started image transfer handler on {}", addr),
+        Err(e) => eprintln!("Failed to get local address: {}", e),
+    }
 
     let mut buf = [0; 1024 + 2];
     let mut received_packets: HashMap<u16, Vec<u8>> = HashMap::new();
@@ -126,7 +236,11 @@ async fn handle_image_transfer(
 
     // Step 1: Receive the image from the client
     loop {
-        let (len, addr) = socket.recv_from(&mut buf).await?;
+        let (len, addr) = socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+
         if addr != client_addr {
             println!("Ignoring packet from unknown client {}", addr);
             continue;
@@ -142,7 +256,7 @@ async fn handle_image_transfer(
         received_packets.insert(packet_number, data);
         total_packets = total_packets.max(packet_number + 1);
 
-        socket.send_to(&packet_number.to_be_bytes(), addr).await?;
+        let _ = socket.send_to(&packet_number.to_be_bytes(), addr).await;
         println!("Received packet {} and sent acknowledgment.", packet_number);
     }
 
@@ -153,15 +267,27 @@ async fn handle_image_transfer(
         }
     }
 
-    let temp_file = format!("temp_image_{}.jpeg", socket.local_addr()?);
-    let mut file = File::create(&temp_file)?;
-    file.write_all(&image_data)?;
-    println!("Image saved as '{}'.", temp_file);
+    // Save the received image to a temporary file
+    let encoded_image_result = encode_image(image_data.clone());
+    let mut encoded_bytes: Vec<u8> = Vec::new();
+
+    match encoded_image_result {
+        Ok(encoded_image) => {
+            // Convert ImageBuffer to Vec<u8>
+            encoded_image.save("temp_image.jpeg");
+            encoded_bytes = encoded_image.clone().into_raw(); // If using clone, ensure you handle ownership correctly
+        }
+        Err(e) => {
+            eprintln!("Error encoding image: {}", e);
+        }
+    }
 
     // Step 2: Send the image back to the client
-    let mut file = File::open(&temp_file)?;
+    let mut file = File::open("temp_image.jpeg")
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     let mut image_data = Vec::new();
-    file.read_to_end(&mut image_data)?;
+    file.read_to_end(&mut image_data)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
     let max_packet_size = 1022;
     let mut packet_number: u16 = 0;
@@ -172,11 +298,15 @@ async fn handle_image_transfer(
         packet.extend_from_slice(chunk);
 
         loop {
-            socket.send_to(&packet, client_addr).await?;
+            socket.send_to(&packet, client_addr).await;
             println!("Sent packet {}", packet_number);
 
             let mut ack_buf = [0; 2];
-            match tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut ack_buf)).await
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(1),
+                socket.recv_from(&mut ack_buf),
+            )
+            .await
             {
                 Ok(Ok((_, _))) => {
                     let ack_packet_number = u16::from_be_bytes(ack_buf);
@@ -198,7 +328,7 @@ async fn handle_image_transfer(
     }
 
     let terminator = [255, 255];
-    socket.send_to(&terminator, client_addr).await?;
+    socket.send_to(&terminator, client_addr).await;
     println!("Image sent back to client.");
 
     Ok(())
