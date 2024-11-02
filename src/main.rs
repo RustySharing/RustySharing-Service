@@ -1,18 +1,15 @@
-use tokio::net::UdpSocket;
-use tokio::task;
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Write, Read};
-use std::time::Duration;
+use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use tokio::task;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let server_list = vec![
-        "10.7.16.54".to_string(),
-        "10.7.17.128".to_string(),
-    ];
+    let server_list = vec!["10.7.16.54".to_string(), "10.7.17.128".to_string()];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
@@ -26,7 +23,10 @@ async fn main() -> io::Result<()> {
 
     // Join the multicast group on the specified local interface
     socket.join_multicast_v4(multicast_addr, my_addr.parse::<Ipv4Addr>().unwrap())?;
-    println!("Server joined multicast group {} on interface {}", multicast_addr, my_addr);
+    println!(
+        "Server joined multicast group {} on interface {}",
+        multicast_addr, my_addr
+    );
 
     // Initialize the talking stick status (true if this server should start with the talking stick)
     let my_index = server_list.iter().position(|x| x == my_addr).unwrap();
@@ -45,9 +45,15 @@ async fn main() -> io::Result<()> {
         {
             let has_token = has_token.lock().unwrap();
             if *has_token {
-                println!("Server {} has the talking stick and received a request from {}", my_addr, client_addr);
+                println!(
+                    "Server {} has the talking stick and received a request from {}",
+                    my_addr, client_addr
+                );
             } else {
-                println!("Server {} does NOT have the talking stick but received a request from {}", my_addr, client_addr);
+                println!(
+                    "Server {} does NOT have the talking stick but received a request from {}",
+                    my_addr, client_addr
+                );
             }
         }
 
@@ -64,7 +70,8 @@ async fn main() -> io::Result<()> {
             if len > 0 && buf[0] == 1 {
                 // Generate a new port for this client and create a handler
                 let handler_port = 10000 + rand::random::<u16>() % 1000;
-                let handler_socket = UdpSocket::bind((my_addr.parse::<Ipv4Addr>().unwrap(), handler_port)).await?;
+                let handler_socket =
+                    UdpSocket::bind((my_addr.parse::<Ipv4Addr>().unwrap(), handler_port)).await?;
 
                 // Construct the 6-byte response (4 bytes for IP, 2 bytes for port)
                 let ip_bytes = my_addr.parse::<Ipv4Addr>().unwrap().octets();
@@ -88,18 +95,29 @@ async fn main() -> io::Result<()> {
                 // Release the talking stick and pass it to the next server
                 let mut token = has_token.lock().unwrap();
                 *token = false;
-                socket.send_to(&[99], format!("{}:{}", next_server_addr, multicast_port)).await?;
-                println!("Server {} passed the talking stick to {}", my_addr, next_server_addr);
+                socket
+                    .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
+                    .await?;
+                println!(
+                    "Server {} passed the talking stick to {}",
+                    my_addr, next_server_addr
+                );
             }
         } else {
             // Ignore the request if we don't have the talking stick
-            println!("Server {} received a request but does not have the talking stick; ignoring.", my_addr);
+            println!(
+                "Server {} received a request but does not have the talking stick; ignoring.",
+                my_addr
+            );
         }
     }
 }
 
 // Function to handle image transfer on a unique port
-async fn handle_image_transfer(socket: UdpSocket, client_addr: std::net::SocketAddr) -> io::Result<()> {
+async fn handle_image_transfer(
+    socket: UdpSocket,
+    client_addr: std::net::SocketAddr,
+) -> io::Result<()> {
     println!("Image transfer handler started on {}", socket.local_addr()?);
 
     let mut buf = [0; 1024 + 2];
@@ -158,7 +176,8 @@ async fn handle_image_transfer(socket: UdpSocket, client_addr: std::net::SocketA
             println!("Sent packet {}", packet_number);
 
             let mut ack_buf = [0; 2];
-            match tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut ack_buf)).await {
+            match tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut ack_buf)).await
+            {
                 Ok(Ok((_, _))) => {
                     let ack_packet_number = u16::from_be_bytes(ack_buf);
                     if ack_packet_number == packet_number {
@@ -167,7 +186,10 @@ async fn handle_image_transfer(socket: UdpSocket, client_addr: std::net::SocketA
                     }
                 }
                 _ => {
-                    println!("No acknowledgment received for packet {}, resending...", packet_number);
+                    println!(
+                        "No acknowledgment received for packet {}, resending...",
+                        packet_number
+                    );
                 }
             }
         }
