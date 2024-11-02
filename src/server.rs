@@ -49,13 +49,26 @@ impl ImageEncoder for ImageEncoderService {
         original_file.read_to_end(&mut original_img_bytes).expect("Failed to read original image into bytes");
 
         //Call the encode_image function with the provided image data
-        let encoded_image = match encode_image(original_img_bytes) { // Dereference the reference to the byte slice
+        let encoded_image: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = match encode_image(original_img_bytes) { // Dereference the reference to the byte slice
             Ok(encoded_data) => encoded_data,
             Err(e) => {
                 eprintln!("Error encoding image: {}", e);
                 return Err(Status::internal("Image encoding failed"));
             },
         };
+
+        // img.into_raw(); // Converts ImageBuffer to Vec<u8> for serialising
+
+        /*  Code for client
+
+            // Read the image data
+            let mut img_bytes = vec![0u8; size];
+            stream.read_exact(&mut img_bytes).await.unwrap();
+
+            // Convert the bytes back into an ImageBuffer
+            let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(800, 600, img_bytes).unwrap();
+
+        */
 
         // Save the encoded image to a file
         let output_file_path = "encoded_image.png"; // Specify your output file path
