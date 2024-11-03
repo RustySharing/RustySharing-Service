@@ -216,11 +216,12 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                 // Spawn a new task to handle the image transfer on the new port
                 let client_addr_clone = client_addr;
                 task::spawn(async move {
-                    let _ = handle_image_transfer(handler_socket, client_addr_clone).await;
+                    if let Err(e) = handle_image_transfer(handler_socket, client_addr_clone).await {
+                        eprintln!("Error in image transfer: {}", e);
+                    }
                 });
 
                 // Release the talking stick and pass it to the next server
-
             }
         } else {
             // Ignore the request if we don't have the talking stick
