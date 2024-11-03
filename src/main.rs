@@ -114,7 +114,11 @@ pub fn encode_image(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError + Send>> {
-    let server_list = ["10.7.16.54".to_string(), "10.7.17.128".to_string()];
+    let server_list = [
+        "10.7.16.54".to_string(),
+        "10.7.16.11".to_string(),
+        "10.7.17.128".to_string(),
+    ];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
@@ -220,7 +224,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                         eprintln!("Error in image transfer: {}", e);
                     }
                 });
-
+                println!("Done with transfer!");
                 // Release the talking stick and pass it to the next server
             }
         } else {
@@ -280,23 +284,13 @@ async fn handle_image_transfer(
         }
     }
 
-    // if image_data.len() < 2 || image_data[0] != 0xFF || image_data[1] != 0xD8 {
-    //     eprintln!("Received data is not a valid JPEG image.");
-    // }
-
-    //let img: DynamicImage = load_from_memory(&image_data).expect("Failed to load image from bytes");
-
-    // Optionally, save the image back to a file to verify
-
-    // Save the received image to a temporary file
+    // Encode the received image data
     let encoded_image_result = encode_image(image_data.clone());
-    // let mut encoded_bytes: Vec<u8> = Vec::new();
     let output_path = "temp_image.png";
     match encoded_image_result {
         Ok(encoded_image) => {
-            // Convert ImageBuffer to Vec<u8>
+            // Save the encoded image to a file
             let _ = encoded_image.save(output_path);
-            //encoded_bytes = encoded_image.clone().into_raw(); // If using clone, ensure you handle ownership correctly
         }
         Err(e) => {
             eprintln!("Error encoding image: {}", e);
@@ -311,20 +305,20 @@ async fn handle_image_transfer(
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
     let max_packet_size = 1024;
-    //let mut packet_number: u16 = 0;
 
     for (packet_number, chunk) in (0_u16..).zip(image_data.chunks(max_packet_size)) {
         let mut packet = Vec::with_capacity(2 + chunk.len());
         packet.extend_from_slice(&packet_number.to_be_bytes());
         packet.extend_from_slice(chunk);
 
+        let mut retries = 0;
         loop {
             let _ = socket.send_to(&packet, client_addr).await;
             println!("Sent packet {}", packet_number);
 
             let mut ack_buf = [0; 2];
             match tokio::time::timeout(
-                tokio::time::Duration::from_secs(1),
+                tokio::time::Duration::from_secs(2),
                 socket.recv_from(&mut ack_buf),
             )
             .await
@@ -337,15 +331,18 @@ async fn handle_image_transfer(
                     }
                 }
                 _ => {
+                    retries += 1;
                     println!(
-                        "No acknowledgment received for packet {}, resending...",
-                        packet_number
+                        "No acknowledgment received for packet {}, retrying... (attempt {})",
+                        packet_number, retries
                     );
+                    if retries > 3 {
+                        println!("Giving up on packet {}", packet_number);
+                        break; // Stop retrying after a certain number of attempts
+                    }
                 }
             }
         }
-
-        //packet_number += 1;
     }
 
     let terminator = [255, 255];
