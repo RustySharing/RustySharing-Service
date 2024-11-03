@@ -180,6 +180,16 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
         if *has_token.lock().unwrap() {
             // Server has the talking stick and should proceed to handle the request
             if len > 0 && buf[0] == 1 {
+                let mut token = has_token.lock().unwrap();
+                *token = false;
+                socket
+                    .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+                println!(
+                    "Server {} passed the talking stick to {}",
+                    my_addr, next_server_addr
+                );
                 // Generate a new port for this client and create a handler
                 let handler_port = 10000 + rand::random::<u16>() % 1000;
                 let handler_socket =
@@ -210,16 +220,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
                 });
 
                 // Release the talking stick and pass it to the next server
-                let mut token = has_token.lock().unwrap();
-                *token = false;
-                socket
-                    .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
-                    .await
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
-                println!(
-                    "Server {} passed the talking stick to {}",
-                    my_addr, next_server_addr
-                );
+
             }
         } else {
             // Ignore the request if we don't have the talking stick
