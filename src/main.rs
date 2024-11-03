@@ -308,7 +308,7 @@ async fn handle_image_transfer(
     file.read_to_end(&mut image_data)
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
-    let max_packet_size = 512;
+    let max_packet_size = 1024;
     //let mut packet_number: u16 = 0;
 
     for (packet_number, chunk) in (0_u16..).zip(image_data.chunks(max_packet_size)) {
