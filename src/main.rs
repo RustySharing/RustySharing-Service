@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
-    let my_addr = "10.7.16.11"; // Replace with this server's IP address
+    let my_addr = "10.7.16.54"; // Replace with this server's IP address
 
     let local_socket = "0.0.0.0:9001"; // Bind to all interfaces on port 9001
 
@@ -219,16 +219,16 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
                 // Spawn a new task to handle the image transfer on the new port
                 let client_addr_clone = client_addr;
-                // task::spawn(async move {
-                //     if let Err(e) = handle_image_transfer(handler_socket, client_addr_clone).await {
-                //         eprintln!("Error in image transfer: {}", e);
-                //     }
-                //     println!("Done with transfer!");
-                // });
-                if let Err(e) = handle_image_transfer(handler_socket, client_addr_clone).await {
-                    eprintln!("Error in image transfer: {}", e);
-                }
-                println!("Done with transfer!");
+                task::spawn(async move {
+                    if let Err(e) = handle_image_transfer(handler_socket, client_addr_clone).await {
+                        eprintln!("Error in image transfer: {}", e);
+                    }
+                    // println!("Done with transfer!");
+                });
+                // if let Err(e) = handle_image_transfer(handler_socket, client_addr_clone).await {
+                //     eprintln!("Error in image transfer: {}", e);
+                // }
+                // println!("Done with transfer!");
                 // Release the talking stick and pass it to the next server
             }
         } else {
