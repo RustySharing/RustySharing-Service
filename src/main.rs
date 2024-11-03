@@ -7,10 +7,12 @@ use std::fs::File;
 use std::io::Read;
 use std::net::Ipv4Addr;
 use std::str;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use steganography::encoder;
 use tokio::net::UdpSocket;
 use tokio::task;
+use tokio::time::{self, Duration};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct EmbeddedData {
@@ -112,6 +114,9 @@ pub fn encode_image(
     Ok(encoded_img)
 }
 
+mod election;
+use election::{heartbeat_monitor, heartbeat_receiver, initiate_leader_election};
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError + Send>> {
     let server_list = ["10.7.16.54".to_string(),
@@ -142,23 +147,38 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
     // Initialize the talking stick status (true if this server should start with the talking stick)
     let my_index = server_list.iter().position(|x| x == my_addr).unwrap();
-    let next_server_addr = &server_list[(my_index + 1) % server_list.len()];
     let has_token = Arc::new(Mutex::new(my_index == 0));
+
+    let socket = Arc::new(Mutex::new(socket));
+
+    // Clone has_token when initiating leader election
+    let mut next_server_addr = initiate_leader_election(
+        socket.clone(),
+        server_list.to_vec(),
+        my_addr.to_string(),
+        has_token.clone()
+    ).await;
+
+    // Spawn a heartbeat receiver worker
+    let socket_clone = Arc::clone(&socket);
+    let has_token_clone = Arc::clone(&has_token);
+    task::spawn(async move {
+        heartbeat_receiver(socket_clone, has_token_clone).await;
+    });
 
     loop {
         let mut buf = [0; 1024];
         println!("Waiting to receive data...");
-        let (len, client_addr) = socket
+        let (len, client_addr) = socket.lock().await
             .recv_from(&mut buf)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
 
         // Log that data was received
         println!("Received packet of length {} from {}", len, client_addr);
-
         // Print talking stick status for debugging
         {
-            let has_token = has_token.lock().unwrap();
+            let has_token = has_token.lock().await;
             if *has_token {
                 println!(
                     "Server {} has the talking stick and received a request from {}",
@@ -174,18 +194,25 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
         if len == 1 && buf[0] == 99 {
             // Token received from the previous server
-            let mut token = has_token.lock().unwrap();
+            let mut token = has_token.lock().await;
             *token = true;
             println!("Server {} received the talking stick", my_addr);
             continue;
         }
 
-        if *has_token.lock().unwrap() {
+        if *has_token.lock().await {
+            //TODO: Spawn a new heartbeat receiver worker to respond to heartbeat requests
+            let socket_clone = Arc::clone(&socket);
+            let has_token_clone = Arc::clone(&has_token);
+            task::spawn(async move {
+                heartbeat_receiver(socket_clone, has_token_clone).await;
+            });
+
             // Server has the talking stick and should proceed to handle the request
             if len > 0 && buf[0] == 1 {
-                let mut token = has_token.lock().unwrap();
+                let mut token = has_token.lock().await;
                 *token = false;
-                socket
+                socket.lock().await
                     .send_to(&[99], format!("{}:{}", next_server_addr, multicast_port))
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
@@ -209,7 +236,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
 
                 // Send the 6-byte response to the client
                 println!("Sending response to client: {:?}", response);
-                socket
+                socket.lock().await
                     .send_to(&response, client_addr)
                     .await
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
@@ -227,8 +254,34 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
             }
         } else {
             // Ignore the request if we don't have the talking stick
+            // and spawn a heartbeat worker to check if leader is alive. if timeout is achieved we need to initiate a leader election
+            let leader_addr = next_server_addr.clone();
+            {
+                let socket_clone = Arc::clone(&socket);
+                task::spawn(async move {
+                    heartbeat_monitor(socket_clone, leader_addr).await;
+                });
+            }
+
+            // Initiate leader election if heartbeat fails
+            let server_list_clone = server_list.to_vec();
+            let my_addr_clone = my_addr.to_string();
+            next_server_addr = initiate_leader_election(
+                socket.clone(),
+                server_list.to_vec(),
+                my_addr.to_string(),
+                has_token.clone()
+            ).await;
+            {
+                let socket_clone = Arc::clone(&socket);
+                let has_token_clone = Arc::clone(&has_token);
+                task::spawn(async move {
+                    initiate_leader_election(socket_clone, server_list_clone, my_addr_clone, has_token_clone).await;
+                });
+            }
+
             println!(
-                "Server {} received a request but does not have the talking stick; ignoring.",
+                "Server {} received a request but does not have the talking stick; heartbeating, leader.",
                 my_addr
             );
         }
@@ -310,7 +363,7 @@ async fn handle_image_transfer(
         File::open(output_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
     let mut image_data = Vec::new();
     file.read_to_end(&mut image_data)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send>)?;
+        .map_err(|e| Box::new(e) as Box::<dyn std::error::Error + Send>)?;
 
     let max_packet_size = 1024;
     //let mut packet_number: u16 = 0;

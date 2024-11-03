@@ -10,5 +10,4 @@ image = "0.21.3"
 serde_json = "1.0.132"
 steganography = "1.0.2"
 rand = "0.8.5"
-almost-raft = "0.3.0"
-async-trait = "0.1.83"
+
