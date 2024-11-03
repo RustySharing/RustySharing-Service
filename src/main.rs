@@ -114,11 +114,14 @@ pub fn encode_image(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError + Send>> {
-    let server_list = ["10.7.16.54".to_string(), "10.7.17.128".to_string()];
+    let server_list = ["10.7.16.54".to_string(),
+     "10.7.17.128".to_string(),
+     "10.7.16.34".to_string()
+     ];
 
     let multicast_addr: Ipv4Addr = "239.255.0.1".parse().unwrap();
     let multicast_port = 9001;
-    let my_addr = "10.7.16.54"; // Replace with this server's IP address
+    let my_addr = "10.7.16.34"; // Replace with this server's IP address
 
     let local_socket = "0.0.0.0:9001"; // Bind to all interfaces on port 9001
 
