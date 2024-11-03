@@ -268,7 +268,7 @@ async fn main() -> Result<(), Box<dyn StdError + Send>> {
             let my_addr_clone = my_addr.to_string();
             next_server_addr = initiate_leader_election(
                 socket.clone(),
-                server_list.to_vec(),
+                server_list.clone().to_vec(),
                 my_addr.to_string(),
                 has_token.clone()
             ).await;
