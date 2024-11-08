@@ -1,2 +1,4 @@
 target/
 .vscode
+extracted/input.jpeg
+image-with-a-file-inside.png
