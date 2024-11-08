@@ -29,7 +29,7 @@ impl ImageEncoder for ImageEncoderService {
         request: Request<EncodedImageRequest>,
     ) -> Result<Response<EncodedImageResponse>, Status> {
         let request = request.into_inner();
-        println!("Got a request: {:?}", request);
+        println!("Got a request!");
 
         // Get the image data from the request
         let image_data = &request.image_data; // Assuming image_data is passed as bytes
