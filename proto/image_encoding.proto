@@ -7,6 +7,7 @@ service ImageEncoder {
 
 message EncodedImageRequest {
   bytes image_data = 1;
+  string file_name = 2;
 }
 
 message EncodedImageResponse {
