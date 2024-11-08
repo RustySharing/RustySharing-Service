@@ -23,6 +23,7 @@ get_if_addrs = "0.5.3"
 local-ip = "0.1.0"
 image = "0.21.3"
 regex = "1.11.1"
+stegano-core = "0.5.3"
 
 
 

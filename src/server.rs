@@ -91,8 +91,6 @@ impl ImageEncoder for ImageEncoderService {
 
         // Construct the response with the encoded image data
         let reply = EncodedImageResponse {
-            width: encoded_width as i32,
-            height: encoded_height as i32,
             image_data: encoded_bytes.clone(), // Echo the original image data in the response
         };
 
@@ -102,8 +100,9 @@ impl ImageEncoder for ImageEncoderService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ip = local_ip::get().unwrap();
-    let addr = format!("{}:50051", ip.to_string()).parse()?;
+    // let ip = local_ip::get().unwrap();
+    // let addr = format!("{}:50051", ip.to_string()).parse()?;
+    let addr = "[::1]:50051".parse()?;
     let image_encoder_service = ImageEncoderService {};
 
     Server::builder()
