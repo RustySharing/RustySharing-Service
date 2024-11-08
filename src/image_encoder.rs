@@ -63,9 +63,7 @@ fn calculate_aspect_ratio(width: u32, height: u32) -> (u32, u32) {
 }
 
 // Function to encode an image with embedded data
-pub fn encode_image(
-    img: Vec<u8>,
-) -> Result<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>, Box<dyn Error>> {
+pub fn encode_image(img: Vec<u8>) -> Result<String, Box<dyn Error>> {
     print!("Started Encoding!");
 
     // let data = "Hello, steganography!\n2024-10-27T00:00:00Z".to_string();
@@ -123,5 +121,5 @@ pub fn encode_image(
     println!("Extracted file saved to: {}", extraction_path);
 
     // Return the encoded image data if successful
-    Ok(extraction_path)
+    Ok(extraction_path.to_string())
 }
