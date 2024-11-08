@@ -1,8 +1,9 @@
 use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::str;
-use steganography::decoder;
+use steganography::util::file_to_bytes;
 use tonic::{transport::Server, Request, Response, Status};
 // Import your encode_image function
 use rpc_service::image_encoder::encode_image;
@@ -38,57 +39,17 @@ impl ImageEncoder for ImageEncoderService {
         //     .map_err(|_| Status::internal("Failed to load image from memory"))?;
 
         // Call the encode_image function with the loaded image
-        let encoded_image: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-            match encode_image(image_data.clone()) {
-                // Pass the loaded image directly
-                Ok(encoded_data) => encoded_data,
-                Err(e) => {
-                    eprintln!("Error encoding image: {}", e);
-                    return Err(Status::internal("Image encoding failed"));
-                }
-            };
+        let encoded_image = match encode_image(image_data.clone()) {
+            // Pass the loaded image directly
+            Ok(encoded_img_path) => encoded_img_path,
+            Err(e) => {
+                eprintln!("Error encoding image: {}", e);
+                return Err(Status::internal("Image encoding failed"));
+            }
+        };
 
-        let (encoded_width, encoded_height) = encoded_image.dimensions();
-        let encoded_bytes = encoded_image.clone().into_raw();
-        // Save the encoded image to a file if needed (optional)
-        let output_file_path = "encoded_image.png"; // Specify your output file path
-        encoded_image
-            .save(output_file_path)
-            .expect("Failed to save encoded image");
-
-        println!("Encoded image saved to {}", output_file_path);
-
-        // Decode the encoded image
-        let decoded_img = image::open(output_file_path).expect("Failed to open encoded image");
-        let my_decoder = decoder::Decoder::new(decoded_img.to_rgba());
-        let decoded_data = my_decoder.decode_alpha();
-
-        // Find the position of the JSON content
-        let start = decoded_data
-            .iter()
-            .position(|&b| b == b'{')
-            .expect("Opening brace not found");
-        let end = decoded_data
-            .iter()
-            .position(|&b| b == b'}')
-            .expect("Closing brace not found");
-
-        let json_part = &decoded_data[start..=end]; // Include the closing brace
-        let original_image_part = &decoded_data[end + 1..]; // Skip past the closing brace
-
-        let decoded_json: EmbeddedData =
-            serde_json::from_slice(json_part).expect("Failed to parse JSON data");
-        println!("Decoded Data: {:?}", decoded_json);
-
-        // Save the extracted original image (optional)
-        let original_image_output_path = "extracted_original_image.png";
-        std::fs::write(original_image_output_path, original_image_part)
-            .expect("Failed to save the extracted original image");
-        println!(
-            "Extracted original image saved as: {}",
-            original_image_output_path
-        );
-
+        let file = File::open(encoded_image)?;
+        let encoded_bytes = file_to_bytes(file);
         // Construct the response with the encoded image data
         let reply = EncodedImageResponse {
             image_data: encoded_bytes.clone(), // Echo the original image data in the response

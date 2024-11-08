@@ -97,10 +97,6 @@ pub fn encode_image(img: Vec<u8>) -> Result<String, Box<dyn Error>> {
         )));
     }
 
-    if let Err(e) = create_directory_if_not_exists(extraction_path) {
-        eprintln!("Error creating directory: {}", e);
-    }
-
     // Embed the input file into the image
     SteganoCore::encoder()
         .hide_files(input_paths) // Hide the file (input.jpeg)
@@ -111,6 +107,9 @@ pub fn encode_image(img: Vec<u8>) -> Result<String, Box<dyn Error>> {
 
     println!("Image with embedded data saved to: {}", output_path);
 
+    if let Err(e) = create_directory_if_not_exists(extraction_path) {
+        eprintln!("Error creating directory: {}", e);
+    }
     // Extract the hidden file from the image
     let _ = unveil(
         Path::new(output_path),
@@ -121,5 +120,5 @@ pub fn encode_image(img: Vec<u8>) -> Result<String, Box<dyn Error>> {
     println!("Extracted file saved to: {}", extraction_path);
 
     // Return the encoded image data if successful
-    Ok(extraction_path.to_string())
+    Ok(output_path.to_string())
 }
