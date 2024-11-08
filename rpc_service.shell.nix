@@ -15,8 +15,4 @@ pkgs.mkShell {
     ];
   RUST_BACKTRACE = 1;
 
-  shellHook = ''
-    export CARGO_HOME=$HOME/.cargo
-    export RUSTUP_HOME=$HOME/.rustup
-  '';
 }
