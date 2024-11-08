@@ -108,7 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
-        .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
         .add_service(ImageEncoderServer::new(image_encoder_service))
         .serve(addr)
         .await?;
