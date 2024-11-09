@@ -42,10 +42,11 @@ struct RaftNode {
     term: u64,
     voted_for: Option<String>,
     id: String,
-    encoding_socket: String,  // Socket for client-facing encoding service on port 50051
+    encoding_socket: String,
     timeout_duration: Duration,
     last_heartbeat: Instant,
     peers: Vec<String>,
+    priority: u64, // Randomly generated priority for each election
 }
 
 impl RaftNode {
@@ -59,21 +60,30 @@ impl RaftNode {
             timeout_duration: Duration::from_millis(rand::thread_rng().gen_range(150..300)),
             last_heartbeat: Instant::now(),
             peers,
+            priority: 0,
         }
+    }
+
+    // Generate a new random priority for each election
+    fn generate_priority(&mut self) {
+        self.priority = rand::thread_rng().gen_range(1..100); // Generate priority in range 1-100
+        println!("Node {} generated priority: {}", self.id, self.priority);
     }
 
     async fn start_election(&mut self) -> String {
         self.state = ServerState::Candidate;
         self.term += 1;
         self.voted_for = Some(self.id.clone());
-        println!("Node {} is starting an election for term {}", self.id, self.term);
+
+        // Generate a new priority for this election
+        self.generate_priority();
 
         let mut votes = 1;
 
         for peer in &self.peers {
-            match request_vote(peer, self.term, &self.id).await {
-                Ok(vote_granted) => {
-                    if vote_granted {
+            match request_vote(peer, self.term, &self.id, self.priority).await {
+                Ok((vote_granted, peer_priority)) => {
+                    if vote_granted && peer_priority > self.priority {
                         votes += 1;
                     }
                 }
@@ -83,10 +93,11 @@ impl RaftNode {
             }
         }
 
+        // Elect the node with the lowest priority
         if votes > self.peers.len() / 2 {
-            println!("Node {} is elected as the leader!", self.id);
+            println!("Node {} is elected as the leader with priority {}", self.id, self.priority);
             self.state = ServerState::Leader;
-            return self.encoding_socket.clone(); // Return encoding socket (50051) on successful election
+            return self.encoding_socket.clone();
         } else {
             println!("Node {} failed to become the leader", self.id);
             self.state = ServerState::Follower;
@@ -94,18 +105,23 @@ impl RaftNode {
         }
     }
 
-    // Method to check if the current node is the leader
     fn is_leader(&self) -> bool {
         self.state == ServerState::Leader
     }
 }
 
-// Function to send a vote request to another peer
-async fn request_vote(peer_ip: &str, term: u64, candidate_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+// Function to send a vote request to another peer, including the candidate's priority
+async fn request_vote(
+    peer_ip: &str,
+    term: u64,
+    candidate_id: &str,
+    candidate_priority: u64,
+) -> Result<(bool, u64), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
     let request = VoteRequest {
         term,
         candidate_id: candidate_id.to_string(),
+        candidate_priority,
     };
     let request_bytes = serde_json::to_vec(&request)?;
     stream.write_all(&request_bytes).await?;
@@ -113,18 +129,20 @@ async fn request_vote(peer_ip: &str, term: u64, candidate_id: &str) -> Result<bo
     let mut buffer = [0; 128];
     let n = stream.read(&mut buffer).await?;
     let response: VoteResponse = serde_json::from_slice(&buffer[..n])?;
-    Ok(response.vote_granted)
+    Ok((response.vote_granted, response.node_priority))
 }
 
 #[derive(Serialize, Deserialize)]
 struct VoteRequest {
     term: u64,
     candidate_id: String,
+    candidate_priority: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct VoteResponse {
     vote_granted: bool,
+    node_priority: u64, // Include the node's priority in the response
 }
 
 async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -141,22 +159,29 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
             let vote_request: VoteRequest = serde_json::from_slice(&buffer[..n]).expect("Failed to parse VoteRequest");
 
             let mut raft = raft_clone.lock().await;
+
+            // Grant the vote if the term is newer or priorities favor the candidate
             let vote_granted = if vote_request.term > raft.term {
                 raft.term = vote_request.term;
+                raft.voted_for = Some(vote_request.candidate_id.clone());
+                true
+            } else if vote_request.term == raft.term && vote_request.candidate_priority < raft.priority {
                 raft.voted_for = Some(vote_request.candidate_id.clone());
                 true
             } else {
                 false
             };
 
-            let response = VoteResponse { vote_granted };
+            let response = VoteResponse {
+                vote_granted,
+                node_priority: raft.priority,
+            };
             let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
             socket.write_all(&response_bytes).await.expect("Failed to send response");
         });
     }
 }
 
-// Define your ImageEncoderService
 struct ImageEncoderService {
     raft: Arc<Mutex<RaftNode>>,
 }
