@@ -1,6 +1,7 @@
 use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 use leader_provider::leader_provider_server::{LeaderProvider, LeaderProviderServer};
+use rand::Rng;
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
@@ -35,33 +36,34 @@ struct NodeInfo {
     address: String,
     load: f32,
     last_updated: u64,
-    rank: u64,
+    rank: u64, // Used as a tiebreaker and for leader stability
 }
 
 #[derive(Debug)]
 struct LeaderElection {
     nodes: HashMap<String, NodeInfo>,
-    current_leader: Option<String>,
+    current_leader: Option<String>, // Track current leader for stability
     self_address: String,
     known_peers: Vec<String>,
     system: System,
+    self_rank: u64, // Store own rank
 }
-
-struct LeaderProviderService {
-    state: LeaderState,
-}
-
-struct ImageEncoderService {}
 
 #[derive(Clone)]
 struct LeaderState {
     election: Arc<Mutex<LeaderElection>>,
 }
+struct LeaderProviderService {
+    state: LeaderState,
+}
 
-// New service for inter-node communication
 struct NodeCommunicationService {
     state: LeaderState,
 }
+
+struct ImageEncoderService {}
+
+// New service for inter-node communication
 
 #[tonic::async_trait]
 impl NodeCommunicator for NodeCommunicationService {
@@ -72,7 +74,7 @@ impl NodeCommunicator for NodeCommunicationService {
         let update = request.into_inner();
         let mut election = self.state.election.lock().await;
 
-        election.update_node(update.node_address, update.load);
+        election.update_node(update.node_address, update.load, update.rank);
 
         Ok(Response::new(LoadUpdateResponse {}))
     }
@@ -80,12 +82,16 @@ impl NodeCommunicator for NodeCommunicationService {
 
 impl LeaderElection {
     fn new(self_address: String, known_peers: Vec<String>) -> Self {
+        // Generate a random rank for this node
+        let self_rank = rand::thread_rng().gen_range(0..u64::MAX);
+
         LeaderElection {
             nodes: HashMap::new(),
             current_leader: None,
             self_address,
             known_peers,
             system: System::new_all(),
+            self_rank,
         }
     }
 
@@ -104,13 +110,11 @@ impl LeaderElection {
         0.7 * cpu_load + 0.3 * memory_load
     }
 
-    fn update_node(&mut self, address: String, load: f32) {
+    fn update_node(&mut self, address: String, load: f32, rank: u64) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-
-        let rank = (load * 1000.0) as u64 + timestamp % 1000;
 
         self.nodes.insert(
             address.clone(),
@@ -135,6 +139,7 @@ impl LeaderElection {
                 let request = Request::new(LoadUpdate {
                     node_address: self.self_address.clone(),
                     load,
+                    rank: self.self_rank,
                 });
 
                 client.update_load(request).await?;
@@ -149,13 +154,54 @@ impl LeaderElection {
             .unwrap()
             .as_secs();
 
+        // Remove stale nodes (not updated in last 10 seconds)
         self.nodes
             .retain(|_, info| current_time - info.last_updated < 10);
 
-        self.nodes
+        let current_load = self.get_current_load();
+
+        // Add self to the nodes if not already present
+        if !self.nodes.contains_key(&self.self_address) {
+            self.update_node(self.self_address.clone(), current_load, self.self_rank);
+        }
+
+        // Find the node with minimum load
+        // If loads are equal, use rank as tiebreaker
+        // If current leader is within acceptable load difference, maintain leadership
+        const LOAD_THRESHOLD: f32 = 10.0; // 10% load difference threshold
+
+        let min_load_node = self
+            .nodes
             .values()
-            .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap())
-            .map(|node| node.address.clone())
+            .min_by(|a, b| {
+                match a.load.partial_cmp(&b.load).unwrap() {
+                    std::cmp::Ordering::Equal => b.rank.cmp(&a.rank), // Higher rank wins
+                    other => other,
+                }
+            })
+            .map(|node| node.address.clone());
+
+        // Leadership stability logic
+        if let Some(current_leader) = self.current_leader.as_ref() {
+            if let (Some(current_info), Some(min_load_info)) = (
+                self.nodes.get(current_leader),
+                min_load_node.as_ref().and_then(|addr| self.nodes.get(addr)),
+            ) {
+                // If current leader's load is within threshold of minimum load, keep current leader
+                if (current_info.load - min_load_info.load).abs() <= LOAD_THRESHOLD {
+                    println!("Maintaining current leader due to load threshold");
+                    return Some(current_leader.clone());
+                }
+            }
+        }
+
+        // Update current leader
+        self.current_leader = min_load_node.clone();
+        min_load_node
+    }
+
+    fn get_node_info(&self, address: &str) -> Option<&NodeInfo> {
+        self.nodes.get(address)
     }
 }
 
@@ -191,9 +237,10 @@ impl LeaderProvider for LeaderProviderService {
         // Get current load
         let current_load = election.get_current_load();
         let self_address = election.self_address.clone();
+        let self_rank = election.self_rank;
 
         // Update own node info
-        election.update_node(self_address.clone(), current_load);
+        election.update_node(self_address.clone(), current_load, self_rank);
 
         // Broadcast load to other nodes
         if let Err(e) = election.broadcast_load(current_load).await {
@@ -205,6 +252,14 @@ impl LeaderProvider for LeaderProviderService {
             Some(leader) => leader,
             None => return Err(Status::internal("No available leader")),
         };
+
+        // Log detailed election information
+        if let Some(leader_info) = election.get_node_info(&leader_address) {
+            println!(
+                "Elected leader: {} (load: {:.2}%, rank: {})",
+                leader_address, leader_info.load, leader_info.rank
+            );
+        }
 
         let reply = leader_provider::LeaderProviderResponse {
             leader_socket: leader_address,

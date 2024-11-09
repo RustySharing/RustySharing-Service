@@ -8,6 +8,7 @@ service NodeCommunicator {
 message LoadUpdate {
     string node_address = 1;
     float load = 2;
+    uint64 rank = 3;  // Added rank field
 }
 
 message LoadUpdateResponse {}
