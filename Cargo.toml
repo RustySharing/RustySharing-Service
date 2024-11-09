@@ -24,11 +24,14 @@ local-ip = "0.1.0"
 image = "0.21.3"
 regex = "1.11.1"
 stegano-core = "0.5.3"
+almost-raft = "0.3.0"
+async-trait = "0.1"
 
 [dependencies.uuid]
 version = "1.11.0"
 features = [
     "v6",
+    "v4",
     "std",
     "rng"
 ]

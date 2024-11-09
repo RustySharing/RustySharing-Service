@@ -53,6 +53,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "almost-raft"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fd292081a67f810c9680c791e1253fd53056cd007236942f3c4e782d7eebfcd"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "log",
+ "rand",
+ "serde",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1750,6 +1765,8 @@ checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 name = "rpc_service"
 version = "0.1.0"
 dependencies = [
+ "almost-raft",
+ "async-trait",
  "get_if_addrs",
  "gtk4",
  "image 0.21.3",
