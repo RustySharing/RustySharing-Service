@@ -5,7 +5,7 @@ use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
 use steganography::util::file_to_bytes;
-use tokio::sync::{mpsc, Mutex}; // Use tokio::sync::Mutex for async compatibility
+use tokio::sync::{mpsc, Mutex};
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 use almost_raft::{election::{RaftElectionState, raft_election}, Message, Node};
@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    sleep(Duration::from_secs(2)).await; // Allow some time for nodes to join the cluster
+    sleep(Duration::from_secs(5)).await; // Increased delay to allow nodes to join the cluster
 
     // Start the gRPC server with election control
     let addr = format!("{}:50051", local_ip::get().unwrap()).parse()?;
