@@ -80,7 +80,8 @@ impl NodeCommunicator for NodeCommunicationService {
         );
 
         let mut election = self.state.election.lock().await;
-        election.update_node(update.node_address, update.load, update.rank);
+        let election_ref = &mut *election;
+        election_ref.update_node(update.node_address, update.load, update.rank);
 
         Ok(Response::new(LoadUpdateResponse {}))
     }
@@ -162,31 +163,43 @@ impl LeaderElection {
         let mut failed_nodes = Vec::new();
         let mut broadcast_errors = Vec::new();
 
-        for peer in &self.known_peers {
+        for peer in &self.known_peers.clone() {
+            // Clone to avoid borrowing issues
             if peer != &self.self_address {
-                println!("DEBUG: Sending load update to peer {}", peer);
+                println!("DEBUG: Attempting to send load update to peer {}", peer);
 
-                match NodeCommunicatorClient::connect(format!("http://{}", peer)).await {
-                    Ok(mut client) => {
-                        let request = Request::new(LoadUpdate {
-                            node_address: self.self_address.clone(),
-                            load,
-                            rank: self.self_rank,
-                        });
+                let timeout_duration = Duration::from_secs(2);
+                let self_addr = self.self_address.clone();
+                let self_rank = self.self_rank;
 
-                        match client.update_load(request).await {
-                            Ok(_) => println!("DEBUG: Successfully sent load update to {}", peer),
-                            Err(e) => {
-                                println!("DEBUG: Failed to send load update to {}: {}", peer, e);
-                                failed_nodes.push(peer.clone());
-                                broadcast_errors.push(format!("Failed to send to {}: {}", peer, e));
-                            }
+                match tokio::time::timeout(timeout_duration, async move {
+                    match NodeCommunicatorClient::connect(format!("http://{}", peer)).await {
+                        Ok(mut client) => {
+                            let request = Request::new(LoadUpdate {
+                                node_address: self_addr,
+                                load,
+                                rank: self_rank,
+                            });
+
+                            client.update_load(request).await
                         }
+                        Err(e) => Err(Status::internal(format!("Failed to connect: {}", e))),
                     }
-                    Err(e) => {
-                        println!("DEBUG: Failed to connect to peer {}: {}", peer, e);
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        println!("DEBUG: Successfully sent load update to {}", peer);
+                    }
+                    Ok(Err(e)) => {
+                        println!("DEBUG: Failed to send load update to {}: {}", peer, e);
                         failed_nodes.push(peer.clone());
-                        broadcast_errors.push(format!("Failed to connect to {}: {}", peer, e));
+                        broadcast_errors.push(format!("Failed to send to {}: {}", peer, e));
+                    }
+                    Err(_) => {
+                        println!("DEBUG: Timeout while sending load update to {}", peer);
+                        failed_nodes.push(peer.clone());
+                        broadcast_errors.push(format!("Timeout while sending to {}", peer));
                     }
                 }
             }
@@ -200,7 +213,7 @@ impl LeaderElection {
         }
 
         // Print current state after cleanup
-        println!("DEBUG: Current nodes after cleanup:");
+        println!("DEBUG: Nodes state after broadcast:");
         for (addr, info) in &self.nodes {
             println!(
                 "DEBUG: Node {}: load={}, rank={}, last_updated={}",
@@ -216,72 +229,31 @@ impl LeaderElection {
     }
 
     fn elect_leader(&mut self) -> Option<String> {
-        println!("\nDEBUG: Starting leader election process");
-
+        // Remove stale nodes
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // Remove stale nodes
-        let stale_threshold = 10; // 10 seconds
-        let stale_nodes: Vec<String> = self
-            .nodes
-            .iter()
-            .filter(|(_, info)| current_time - info.last_updated >= stale_threshold)
-            .map(|(addr, _)| addr.clone())
-            .collect();
-
-        for stale_node in stale_nodes {
-            println!("DEBUG: Removing stale node {}", stale_node);
-            self.nodes.remove(&stale_node);
-        }
-
-        // Print nodes state after cleanup
-        println!("DEBUG: Current nodes after stale cleanup:");
-        for (addr, info) in &self.nodes {
-            println!(
-                "DEBUG: Node {}: load={}, rank={}, last_updated={}",
-                addr, info.load, info.rank, info.last_updated
-            );
-        }
-
-        // Add self to the nodes if not already present
-        if !self.nodes.contains_key(&self.self_address) {
-            println!("DEBUG: Adding self to nodes list");
-            let current_load = self.get_current_load();
-            self.update_node(self.self_address.clone(), current_load, self.self_rank);
-        }
-
-        const LOAD_THRESHOLD: f32 = 10.0;
+        self.nodes.retain(|_, info| {
+            let is_fresh = current_time - info.last_updated < 10;
+            if !is_fresh {
+                println!("DEBUG: Node {} is stale, removing", info.address);
+            }
+            is_fresh
+        });
 
         // Find node with minimum load
-        let min_load_node = self
-            .nodes
+        self.nodes
             .values()
             .min_by(|a, b| {
                 let comp = a.load.partial_cmp(&b.load).unwrap();
-                println!(
-                    "DEBUG: Comparing nodes {} (load={}, rank={}) and {} (load={}, rank={})",
-                    a.address, a.load, a.rank, b.address, b.load, b.rank
-                );
                 match comp {
-                    std::cmp::Ordering::Equal => {
-                        println!("DEBUG: Loads are equal, comparing ranks");
-                        b.rank.cmp(&a.rank) // Higher rank wins
-                    }
-                    other => {
-                        println!("DEBUG: Loads are different, selecting lower load");
-                        other
-                    }
+                    std::cmp::Ordering::Equal => b.rank.cmp(&a.rank),
+                    other => other,
                 }
             })
-            .map(|node| node.address.clone());
-
-        // Update current leader
-        self.current_leader = min_load_node.clone();
-        println!("DEBUG: New leader elected: {:?}", self.current_leader);
-        min_load_node
+            .map(|node| node.address.clone())
     }
 }
 
@@ -299,13 +271,34 @@ impl LeaderProviderService {
             loop {
                 interval.tick().await;
                 let mut election = state_clone.election.lock().await;
-
                 println!("DEBUG: Periodic load broadcast triggered");
                 let current_load = election.get_current_load();
+
                 if let Err(e) = election.broadcast_load(current_load).await {
-                    println!("DEBUG: Failed to broadcast load periodically: {}", e);
+                    eprintln!("ERROR: Failed to broadcast load periodically: {}", e);
                 }
 
+                // Drop the lock explicitly
+                drop(election);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        // Start monitoring task
+        let state_monitor = state.clone();
+        tokio::spawn(async move {
+            let mut monitor_interval = interval(Duration::from_secs(10));
+
+            loop {
+                monitor_interval.tick().await;
+                let election = state_monitor.election.lock().await;
+                println!("DEBUG: Monitor - Current nodes state:");
+                for (addr, info) in &election.nodes {
+                    println!(
+                        "DEBUG: Node {}: load={}, rank={}, last_updated={}",
+                        addr, info.load, info.rank, info.last_updated
+                    );
+                }
                 // Drop the lock explicitly
                 drop(election);
             }
@@ -356,16 +349,8 @@ impl LeaderProvider for LeaderProviderService {
             }
         };
 
-        // Get leader info from the nodes HashMap directly
-        if let Some(leader_info) = election.nodes.get(&leader_address) {
-            println!(
-                "DEBUG: Election result - Leader: {} (load: {:.2}%, rank: {})",
-                leader_address, leader_info.load, leader_info.rank
-            );
-        }
-
         let reply = leader_provider::LeaderProviderResponse {
-            leader_socket: leader_address,
+            leader_socket: leader_address.clone(),
         };
 
         println!("DEBUG: Returning leader response: {}", reply.leader_socket);
