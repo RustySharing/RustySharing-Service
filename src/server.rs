@@ -108,18 +108,38 @@ impl LeaderProviderService {
 
     // Start the listener to respond with the server’s load metric on port 6000
     fn start_listener(&self) {
+        println!("Starting listener on port 6000...");
         let listener = TcpListener::bind("0.0.0.0:6000").expect("Failed to bind listener");
 
         for stream in listener.incoming() {
-            let mut stream = stream.expect("Failed to accept connection");
-            let mut buffer = [0; 128];
-            let bytes_read = stream.read(&mut buffer).expect("Failed to read from stream");
-            let received_load = String::from_utf8_lossy(&buffer[..bytes_read]);
-            let _load: u64 = received_load.trim().parse().expect("Failed to parse load"); // `_load` to silence the warning
+            match stream {
+                Ok(mut stream) => {
+                    println!("Accepted connection from {:?}", stream.peer_addr());
+                    let mut buffer = [0; 128];
+                    
+                    match stream.read(&mut buffer) {
+                        Ok(bytes_read) => {
+                            let received_load = String::from_utf8_lossy(&buffer[..bytes_read]);
+                            let _load: u64 = received_load.trim().parse().expect("Failed to parse load");
+                            println!("Received load request: {}", received_load);
 
-            let my_load_metric = 10; // Replace with actual load calculation
-            let response = my_load_metric.to_string();
-            stream.write_all(response.as_bytes()).expect("Failed to write to stream");
+                            let my_load_metric = 10; // Replace with actual load calculation
+                            let response = my_load_metric.to_string();
+                            if stream.write_all(response.as_bytes()).is_ok() {
+                                println!("Sent load metric: {}", response);
+                            } else {
+                                println!("Failed to send load metric response");
+                            }
+                        }
+                        Err(e) => {
+                            println!("Failed to read from stream: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to accept connection: {}", e);
+                }
+            }
         }
     }
 }
