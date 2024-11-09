@@ -42,18 +42,20 @@ struct RaftNode {
     term: u64,
     voted_for: Option<String>,
     id: String,
+    encoding_socket: String,  // Socket for client-facing encoding service on port 50051
     timeout_duration: Duration,
     last_heartbeat: Instant,
     peers: Vec<String>,
 }
 
 impl RaftNode {
-    fn new(id: String, peers: Vec<String>) -> Self {
+    fn new(id: String, peers: Vec<String>, encoding_socket: String) -> Self {
         RaftNode {
             state: ServerState::Follower,
             term: 0,
             voted_for: None,
             id,
+            encoding_socket,
             timeout_duration: Duration::from_millis(rand::thread_rng().gen_range(150..300)),
             last_heartbeat: Instant::now(),
             peers,
@@ -84,7 +86,7 @@ impl RaftNode {
         if votes > self.peers.len() / 2 {
             println!("Node {} is elected as the leader!", self.id);
             self.state = ServerState::Leader;
-            return self.id.clone();
+            return self.encoding_socket.clone(); // Return encoding socket (50051) on successful election
         } else {
             println!("Node {} failed to become the leader", self.id);
             self.state = ServerState::Follower;
@@ -222,6 +224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_ip = local_ip().expect("Could not determine local IP address").to_string();
     let id = format!("{}:6000", local_ip);
 
+    // Set the client-facing encoding service socket on port 50051
+    let encoding_socket = format!("{}:50051", local_ip);
+
     let all_ips = vec![
         "10.7.17.128".to_string(),
         "10.7.16.11".to_string(),
@@ -230,10 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
-    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers)));
+    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone())));
     tokio::spawn(start_vote_listener(raft_node.clone()));
 
-    let addr = format!("{}:50051", local_ip).parse()?;
+    let addr = encoding_socket.parse()?;
     let image_encoder_service = ImageEncoderService {
         raft: raft_node.clone(),
     };
