@@ -12,7 +12,6 @@ use steganography::util::file_to_bytes;
 use local_ip_address::local_ip;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-// Import your encode_image function
 use rpc_service::image_encoder::encode_image;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -21,7 +20,6 @@ struct EmbeddedData {
     timestamp: String,
 }
 
-// This module is generated from your .proto file
 pub mod image_encoding {
     tonic::include_proto!("image_encoding");
 }
@@ -48,6 +46,7 @@ struct RaftNode {
     peers: Vec<String>,
     load: u64, // Initial hard-coded load for each node
     load_table: HashMap<String, u64>, // Table to maintain the load of each peer
+    current_leader: Option<String>, // Track the current leader
 }
 
 impl RaftNode {
@@ -63,11 +62,12 @@ impl RaftNode {
             voted_for: None,
             id,
             encoding_socket,
-            timeout_duration: Duration::from_millis(200), // Adjusted timeout if needed
+            timeout_duration: Duration::from_millis(200),
             last_heartbeat: Instant::now(),
             peers,
             load,
             load_table,
+            current_leader: None,
         }
     }
 
@@ -106,7 +106,14 @@ impl RaftNode {
         // If no peer has a lower load, this node becomes the leader
         println!("Node {} is elected as the leader with load {}", self.id, self.load);
         self.state = ServerState::Leader;
-        return self.encoding_socket.clone();
+        self.current_leader = Some(self.encoding_socket.clone());
+
+        // Notify all peers of the new leader
+        for peer in &self.peers {
+            let _ = notify_leader(peer, &self.encoding_socket).await;
+        }
+
+        self.encoding_socket.clone()
     }
 
     fn is_leader(&self) -> bool {
@@ -136,6 +143,17 @@ async fn request_vote(
     Ok((response.vote_granted, response.node_load, response.encoding_socket))
 }
 
+// Function to notify peers of the new leader
+async fn notify_leader(peer_ip: &str, leader_socket: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
+    let notification = LeaderNotification {
+        leader_socket: leader_socket.to_string(),
+    };
+    let notification_bytes = serde_json::to_vec(&notification)?;
+    stream.write_all(&notification_bytes).await?;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 struct VoteRequest {
     term: u64,
@@ -146,8 +164,13 @@ struct VoteRequest {
 #[derive(Serialize, Deserialize)]
 struct VoteResponse {
     vote_granted: bool,
-    node_load: u64,    // Include the node's load in the response
-    encoding_socket: String, // Include the encoding socket for leader identification
+    node_load: u64,
+    encoding_socket: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LeaderNotification {
+    leader_socket: String,
 }
 
 async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -161,29 +184,34 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
         tokio::spawn(async move {
             let mut buffer = [0; 128];
             let n = socket.read(&mut buffer).await.expect("Failed to read data");
-            let vote_request: VoteRequest = serde_json::from_slice(&buffer[..n]).expect("Failed to parse VoteRequest");
 
-            let mut raft = raft_clone.lock().await;
+            if let Ok(vote_request) = serde_json::from_slice::<VoteRequest>(&buffer[..n]) {
+                let mut raft = raft_clone.lock().await;
+                let vote_granted = if vote_request.term > raft.term {
+                    raft.term = vote_request.term;
+                    raft.voted_for = Some(vote_request.candidate_id.clone());
+                    true
+                } else if vote_request.term == raft.term && vote_request.candidate_load < raft.load {
+                    raft.voted_for = Some(vote_request.candidate_id.clone());
+                    true
+                } else {
+                    false
+                };
 
-            // Grant the vote if the term is newer or loads favor the candidate
-            let vote_granted = if vote_request.term > raft.term {
-                raft.term = vote_request.term;
-                raft.voted_for = Some(vote_request.candidate_id.clone());
-                true
-            } else if vote_request.term == raft.term && vote_request.candidate_load < raft.load {
-                raft.voted_for = Some(vote_request.candidate_id.clone());
-                true
-            } else {
-                false
-            };
-
-            let response = VoteResponse {
-                vote_granted,
-                node_load: raft.load,
-                encoding_socket: raft.encoding_socket.clone(),
-            };
-            let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
-            socket.write_all(&response_bytes).await.expect("Failed to send response");
+                let response = VoteResponse {
+                    vote_granted,
+                    node_load: raft.load,
+                    encoding_socket: raft.encoding_socket.clone(),
+                };
+                let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
+                socket.write_all(&response_bytes).await.expect("Failed to send response");
+            } else if let Ok(leader_notification) = serde_json::from_slice::<LeaderNotification>(&buffer[..n]) {
+                let mut raft = raft_clone.lock().await;
+                raft.current_leader = Some(leader_notification.leader_socket.clone());
+                raft.state = ServerState::Follower;
+                println!("Node {} acknowledged new leader at {}", raft.id, leader_notification.leader_socket);
+            }
+            
         });
     }
 }
@@ -219,7 +247,7 @@ impl ImageEncoder for ImageEncoderService {
         request: Request<EncodedImageRequest>,
     ) -> Result<Response<EncodedImageResponse>, Status> {
         let raft = self.raft.lock().await;
-        if !raft.is_leader() {
+        if raft.current_leader.as_deref() != Some(&raft.encoding_socket) {
             return Err(Status::failed_precondition("This server is not the leader."));
         }
 
@@ -255,35 +283,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_ip = local_ip().expect("Could not determine local IP address").to_string();
     let id = format!("{}:6000", local_ip);
 
-    // Set the client-facing encoding service socket on port 50051
     let encoding_socket = format!("{}:50051", local_ip);
-
-    let all_ips = vec![
-        "10.7.17.128".to_string(),
-        "10.7.16.11".to_string(),
-        "10.7.16.54".to_string(),
-    ];
-
+    let all_ips = vec!["10.7.17.128".to_string(), "10.7.16.11".to_string()];
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
-    // Hard-code initial load for testing
     let load = match local_ip.as_str() {
         "10.7.17.128" => 15,
         "10.7.16.11" => 20,
-        "10.7.16.54" => 10,
-        _ => 100, // Default load for any other IP
+        _ => 100,
     };
 
     let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone(), load)));
     tokio::spawn(start_vote_listener(raft_node.clone()));
 
     let addr = encoding_socket.parse()?;
-    let image_encoder_service = ImageEncoderService {
-        raft: raft_node.clone(),
-    };
-    let leader_provider_service = LeaderProviderService {
-        raft: raft_node.clone(),
-    };
+    let image_encoder_service = ImageEncoderService { raft: raft_node.clone() };
+    let leader_provider_service = LeaderProviderService { raft: raft_node.clone() };
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024))
