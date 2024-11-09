@@ -100,49 +100,42 @@ impl ImageEncoder for ImageEncoderService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Define the IP addresses of the nodes in the cluster
     let node_ips = vec![
         "10.7.16.11".to_string(),
         "10.7.17.128".to_string(),
-        "10.7.16.54".to_string(),
     ];
 
-    // Initialize the node's unique ID
     let self_id = Uuid::new_v4().to_string();
-
-    // Create a channel for communication with the Raft election process
     let (tx, mut from_raft) = mpsc::channel(10);
 
-    // Initialize the Raft election state
+    // Initialize the Raft election state with debug log
+    println!("Initializing Raft election state for node {}", self_id);
     let (state, tx_to_raft) = RaftElectionState::init(
         self_id.clone(),
-        5000,   // timeout in milliseconds
-        1000,   // heartbeat interval in milliseconds
-        20,     // message timeout in milliseconds
-        vec![], // initial list of nodes; can be populated later
+        5000,
+        1000,
+        20,
+        vec![],
         tx.clone(),
-        3,      // number of nodes in the cluster
-        2,      // min number of nodes to start election
+        3,
+        2,
     );
 
-    // Spawn the Raft election process
     tokio::spawn(raft_election(state));
-
-    // Shared state to track if this node is the leader
     let is_leader = Arc::new(Mutex::new(false));
     let is_leader_clone = Arc::clone(&is_leader);
 
-    // Spawn a task to listen for leadership changes
+    // Listen for leader changes
     tokio::spawn(async move {
         while let Some(message) = from_raft.recv().await {
             match message {
-                Message::ControlLeaderChanged(leader_id) => { // Updated to use ControlLeaderChanged
+                Message::ControlLeaderChanged(leader_id) => {
                     let mut is_leader = is_leader_clone.lock().unwrap();
                     *is_leader = leader_id == self_id;
                     if *is_leader {
-                        println!("This node is now the leader");
+                        println!("Node {} is now the leader", self_id);
                     } else {
-                        println!("This node is a follower. Leader ID: {}", leader_id);
+                        println!("Node {} is a follower. Leader ID: {}", self_id, leader_id);
                     }
                 }
                 _ => {}
@@ -150,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Add each node to the cluster
+    // Add each node to the cluster with debug logs
     for ip in &node_ips {
         let node_id = Uuid::new_v4().to_string();
         let (node_tx, _node_rx) = mpsc::channel(10);
@@ -158,21 +151,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: node_id.clone(),
             sender: node_tx,
         };
-        tx_to_raft
-            .send(Message::ControlAddNode(node))
-            .await
-            .expect("Failed to add node");
+        println!("Adding node {} with IP {} to the Raft cluster", node_id, ip);
+
+        if let Err(e) = tx_to_raft.send(Message::ControlAddNode(node)).await {
+            eprintln!("Failed to add node {}: {}", node_id, e);
+        }
     }
 
-    // Wait for the election to complete
     sleep(Duration::from_secs(6)).await;
 
-    // Start the gRPC server
     let addr = format!("{}:50051", local_ip::get().unwrap()).parse()?;
     let image_encoder_service = ImageEncoderService { is_leader };
 
     Server::builder()
-        .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
+        .max_frame_size(Some(10 * 1024 * 1024))
         .add_service(ImageEncoderServer::new(image_encoder_service))
         .serve(addr)
         .await?;
