@@ -1,47 +1,83 @@
-use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
-use image_encoding::{EncodedImageRequest, EncodedImageResponse};
-use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::str;
-use steganography::util::file_to_bytes;
 use tonic::{transport::Server, Request, Response, Status};
-// Import your encode_image function
-use rpc_service::image_encoder::encode_image;
+use std::collections::HashMap;
+use std::fs::{File, read};
+use serde::{Deserialize, Serialize};
+use rand::Rng;  // For generating random numbers (e.g., for simulating votes)
 
-#[derive(Serialize, Deserialize, Debug)]
-struct EmbeddedData {
-    message: String,
-    timestamp: String,
-}
-
-// This module is generated from your .proto file
 pub mod image_encoding {
-    tonic::include_proto!("image_encoding");
+    tonic::include_proto!("image_encoding");  // Include generated proto code
 }
 
-// Define your ImageEncoderService
-struct ImageEncoderService {}
+pub mod raft {
+    tonic::include_proto!("raft");  // Include generated proto code for raft
+}
 
+// Define the RaftNode struct
+#[derive(Debug, Clone)]  // Derive Clone here for RaftNode
+pub struct RaftNode {
+    pub id: String,
+    pub state: RaftState,
+    pub term: u32,
+    pub voted_for: Option<String>,
+    pub peers: Vec<String>,
+}
+
+// Raft state enum
+#[derive(Clone, Debug, PartialEq)]  // Add Clone and PartialEq
+pub enum RaftState {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+// Simulated Raft leader election
+async fn start_raft_election(node: &RaftNode) {
+    let mut votes_received: HashMap<String, bool> = HashMap::new();
+    let peers = &node.peers;
+    
+    let vote_request = raft::VoteRequest {
+        candidate_id: node.id.clone(),
+        term: node.term as i32,  // Casting to i32
+        last_log_index: 0,
+        last_log_term: 0,
+    };
+
+    // Simulate leader election process
+    for peer in peers {
+        if rand::random::<f32>() < 0.5 {
+            votes_received.insert(peer.clone(), true);
+        } else {
+            votes_received.insert(peer.clone(), false);
+        }
+    }
+
+    let votes_granted = votes_received.values().filter(|&&v| v).count();
+    if votes_granted > peers.len() / 2 {
+        println!("Leader elected: {}", node.id);
+    } else {
+        println!("Election failed for candidate: {}", node.id);
+    }
+}
+
+// Define the MyService struct
+#[derive(Default)]
+pub struct MyService;
+
+// Implement the ImageEncoder trait for the MyService struct
 #[tonic::async_trait]
-impl ImageEncoder for ImageEncoderService {
+impl image_encoding::image_encoder_server::ImageEncoder for MyService {
     async fn image_encode(
         &self,
-        request: Request<EncodedImageRequest>,
-    ) -> Result<Response<EncodedImageResponse>, Status> {
+        request: Request<image_encoding::EncodedImageRequest>,
+    ) -> Result<Response<image_encoding::EncodedImageResponse>, Status> {
         let request = request.into_inner();
-        println!("Got a request!");
+        println!("Got a request to encode image!");
 
-        // Get the image data from the request
-        let image_data = &request.image_data; // Assuming image_data is passed as bytes
+        let image_data = &request.image_data;
         let image_name = &request.file_name;
 
-        // Step 1: Load the image from the byte data
-        // let img = image::load_from_memory(image_data)
-        //     .map_err(|_| Status::internal("Failed to load image from memory"))?;
-
-        // Call the encode_image function with the loaded image
+        // Call the encode_image function to encode the image
         let encoded_image = match encode_image(image_data.clone(), image_name) {
-            // Pass the loaded image directly
             Ok(encoded_img_path) => encoded_img_path,
             Err(e) => {
                 eprintln!("Error encoding image: {}", e);
@@ -49,30 +85,49 @@ impl ImageEncoder for ImageEncoderService {
             }
         };
 
-        let file = File::open(encoded_image.clone())?;
-        let encoded_bytes = file_to_bytes(file);
-        // Construct the response with the encoded image data
-        let reply = EncodedImageResponse {
-            image_data: encoded_bytes.clone(), // Echo the original image data in the response
+        // Read the encoded file and return the response
+        let encoded_bytes = std::fs::read(&encoded_image)?;  // Use path for reading file
+
+        let reply = image_encoding::EncodedImageResponse {
+            image_data: encoded_bytes,
         };
 
-        // delete file file when done
+        // Optionally delete the file when done
         std::fs::remove_file(encoded_image)?;
 
         Ok(Response::new(reply))
     }
 }
 
+// Dummy encode_image function (replace with your actual implementation)
+fn encode_image(image_data: Vec<u8>, image_name: &str) -> Result<String, std::io::Error> {
+    let encoded_image_path = format!("/tmp/encoded_{}.png", image_name);
+    // Simulate encoding (write the image data to a file)
+    std::fs::write(&encoded_image_path, image_data)?;
+    Ok(encoded_image_path)
+}
+
+// Main function to start the server
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = local_ip::get().unwrap();
     let addr = format!("{}:50051", ip.to_string()).parse()?;
-    //let addr = "[::1]:50051".parse()?;
-    let image_encoder_service = ImageEncoderService {};
 
+    // Example of RaftNode
+    let node = RaftNode {
+        id: "node-1".to_string(),
+        state: RaftState::Candidate,
+        term: 1,
+        voted_for: None,
+        peers: vec!["node-2".to_string(), "node-3".to_string()],
+    };
+
+    start_raft_election(&node).await;
+
+    // Add the image encoding service to the gRPC server
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
-        .add_service(ImageEncoderServer::new(image_encoder_service))
+        .add_service(image_encoding::image_encoder_server::ImageEncoderServer::new(MyService {}))
         .serve(addr)
         .await?;
 
