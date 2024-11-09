@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use steganography::util::file_to_bytes;
 use sysinfo::System;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+// use tokio::time::{sleep, Duration};
 use tonic::{transport::Server, Request, Response, Status};
 // Import your encode_image function
 use rpc_service::image_encoder::encode_image;
@@ -134,9 +134,8 @@ impl LeaderProvider for LeaderProviderService {
 
         // Update own load
         let current_load = election.get_current_load();
-        election
-            .update_node(election.self_address.clone(), current_load)
-            .await;
+        let self_address = election.self_address.clone();
+        election.update_node(self_address, current_load).await;
 
         // Trigger election
         let leader_address = match election.elect_leader().await {
