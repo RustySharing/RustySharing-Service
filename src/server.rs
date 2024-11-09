@@ -187,11 +187,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get the local IP address dynamically
     let local_ip = get().expect("Failed to get local IP");
 
-    println!("Starting server on local IP: {}", local_ip);
+    println!("Starting server on local IP: {}", local_ip.to_string());
 
     let addr = format!("{}:50051", local_ip).parse()?;
     let image_encoder_service = ImageEncoderService {};
-    let leader_provider_service = LeaderProviderService::new(local_ip);
+    let leader_provider_service = LeaderProviderService::new(local_ip.to_string());
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
