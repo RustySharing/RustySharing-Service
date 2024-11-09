@@ -150,18 +150,36 @@ impl LeaderProvider for LeaderProviderService {
         &self,
         _request: Request<leader_provider::LeaderProviderEmptyRequest>,
     ) -> Result<Response<leader_provider::LeaderProviderResponse>, Status> {
-        println!("Starting leader election...");
+        println!("Starting leader election on a separate thread...");
 
+        let leader = self.leader.clone();
+        let servers = self.servers.clone();
         let my_load_metric = 15; // Replace with actual load calculation
-        let leader_ip = self.elect_leader(my_load_metric).expect("Failed to elect a leader");
-        
-        let reply = leader_provider::LeaderProviderResponse {
-            leader_socket: format!("{}:50051", leader_ip),
-        };
-        
-        println!("Leader elected: {}", leader_ip);
-        
-        Ok(Response::new(reply))
+
+        // Start leader election in a separate thread
+        thread::spawn(move || {
+            let elected_leader = LeaderProviderService {
+                servers,
+                leader,
+            }.elect_leader(my_load_metric);
+
+            if let Some(leader_ip) = elected_leader {
+                println!("Leader elected: {}", leader_ip);
+            } else {
+                println!("Leader election failed.");
+            }
+        });
+
+        // Return the current leader if already elected
+        let current_leader = self.leader.lock().unwrap();
+        if let Some(ref leader_ip) = *current_leader {
+            let reply = leader_provider::LeaderProviderResponse {
+                leader_socket: format!("{}:50051", leader_ip),
+            };
+            Ok(Response::new(reply))
+        } else {
+            Err(Status::unavailable("Leader election in progress"))
+        }
     }
 }
 
