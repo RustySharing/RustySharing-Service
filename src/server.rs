@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 use steganography::util::file_to_bytes;
-use rand::Rng;
 use local_ip_address::local_ip;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -46,28 +45,22 @@ struct RaftNode {
     timeout_duration: Duration,
     last_heartbeat: Instant,
     peers: Vec<String>,
-    priority: u64, // Randomly generated priority for each election
+    priority: u64, // Statically assigned priority for each node
 }
 
 impl RaftNode {
-    fn new(id: String, peers: Vec<String>, encoding_socket: String) -> Self {
+    fn new(id: String, peers: Vec<String>, encoding_socket: String, priority: u64) -> Self {
         RaftNode {
             state: ServerState::Follower,
             term: 0,
             voted_for: None,
             id,
             encoding_socket,
-            timeout_duration: Duration::from_millis(rand::thread_rng().gen_range(150..300)),
+            timeout_duration: Duration::from_millis(200), // Adjusted timeout if needed
             last_heartbeat: Instant::now(),
             peers,
-            priority: 0,
+            priority,
         }
-    }
-
-    // Generate a new random priority for each election
-    fn generate_priority(&mut self) {
-        self.priority = rand::thread_rng().gen_range(1..100); // Generate priority in range 1-100
-        println!("Node {} generated priority: {}", self.id, self.priority);
     }
 
     async fn start_election(&mut self) -> String {
@@ -75,8 +68,7 @@ impl RaftNode {
         self.term += 1;
         self.voted_for = Some(self.id.clone());
 
-        // Generate a new priority for this election
-        self.generate_priority();
+        println!("Node {} with priority {} is starting an election for term {}", self.id, self.priority, self.term);
 
         let mut min_priority = self.priority;
         let mut leader_socket = self.encoding_socket.clone();
@@ -95,7 +87,7 @@ impl RaftNode {
             }
         }
 
-        // If this node has the lowest priority, it becomes the leader; otherwise, the node with the lowest priority does.
+        // Determine if this node is the leader or if another node with lower priority was elected
         if min_priority == self.priority {
             println!("Node {} is elected as the leader with priority {}", self.id, self.priority);
             self.state = ServerState::Leader;
@@ -259,11 +251,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let all_ips = vec![
         "10.7.17.128".to_string(),
         "10.7.16.11".to_string(),
+        "10.7.16.54".to_string(),
     ];
 
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
-    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone())));
+    // Set a unique, hardcoded priority for each node (adjust as needed)
+    let priority = match local_ip.as_str() {
+        "10.7.17.128" => 1,
+        "10.7.16.11" => 2,
+        "10.7.16.54" => 3,
+        _ => 4, // Default priority for any other IP
+    };
+
+    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone(), priority)));
     tokio::spawn(start_vote_listener(raft_node.clone()));
 
     let addr = encoding_socket.parse()?;
