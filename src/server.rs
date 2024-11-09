@@ -19,7 +19,7 @@ pub struct RaftNode {
     pub state: RaftState,
     pub term: u32,
     pub voted_for: Option<String>,
-    pub peers: Vec<String>,
+    pub peers: Vec<String>,  // List of peer addresses (IP:port)
 }
 
 // Raft state enum
@@ -44,6 +44,7 @@ async fn start_raft_election(node: &RaftNode) {
 
     // Simulate leader election process
     for peer in peers {
+        // Here we are simulating the votes for peers
         if rand::random::<f32>() < 0.5 {
             votes_received.insert(peer.clone(), true);
         } else {
@@ -110,16 +111,21 @@ fn encode_image(image_data: Vec<u8>, image_name: &str) -> Result<String, std::io
 // Main function to start the server
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Assuming local_ip::get() gets the current IP address of the server
     let ip = local_ip::get().unwrap();
     let addr = format!("{}:50051", ip.to_string()).parse()?;
 
-    // Example of RaftNode
+    // Manually setting the RaftNode's ID
+    let node_id = format!("node-{}", ip.to_string());  // Dynamic ID based on IP
     let node = RaftNode {
-        id: "node-1".to_string(),
+        id: node_id,
         state: RaftState::Candidate,
         term: 1,
         voted_for: None,
-        peers: vec!["node-2".to_string(), "node-3".to_string()],
+        peers: vec![
+            "10.7.16.54:50051".to_string(),
+            "10.17.16.11:50051".to_string(),
+        ],
     };
 
     start_raft_election(&node).await;
@@ -133,3 +139,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
