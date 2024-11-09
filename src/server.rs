@@ -2,10 +2,10 @@ use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use steganography::util::file_to_bytes;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex}; // Use tokio::sync::Mutex for async compatibility
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 use almost_raft::{election::{RaftElectionState, raft_election}, Message, Node};
@@ -52,6 +52,8 @@ impl Node for ClusterNode {
 // Define your ImageEncoderService
 struct ImageEncoderService {
     is_leader: Arc<Mutex<bool>>,
+    election_started: Arc<Mutex<bool>>, // Track if the election has been started
+    tx_to_raft: Sender<Message<ClusterNode>>, // Channel to initiate node control messages
 }
 
 #[tonic::async_trait]
@@ -60,9 +62,23 @@ impl ImageEncoder for ImageEncoderService {
         &self,
         request: Request<EncodedImageRequest>,
     ) -> Result<Response<EncodedImageResponse>, Status> {
+        // Trigger election if there is no leader
+        {
+            let mut election_started = self.election_started.lock().await;
+            if !*election_started {
+                println!("Starting leader election...");
+                // Start the election
+                let _ = self.tx_to_raft.send(Message::RequestVote {
+                    node_id: Uuid::new_v4().to_string(),
+                    term: 1,
+                }).await;
+                *election_started = true;
+            }
+        }
+
         // Check if this node is the leader
         {
-            let is_leader = self.is_leader.lock().unwrap();
+            let is_leader = self.is_leader.lock().await;
             if !*is_leader {
                 return Err(Status::failed_precondition("This node is not the leader"));
             }
@@ -71,11 +87,10 @@ impl ImageEncoder for ImageEncoderService {
         let request = request.into_inner();
         println!("Got a request!");
 
-        // Get the image data from the request
-        let image_data = &request.image_data; // Assuming image_data is passed as bytes
+        // Process the request normally if this node is the leader
+        let image_data = &request.image_data;
         let image_name = &request.file_name;
 
-        // Call the encode_image function with the provided image data
         let encoded_image = match encode_image(image_data.clone(), image_name) {
             Ok(encoded_img_path) => encoded_img_path,
             Err(e) => {
@@ -86,14 +101,12 @@ impl ImageEncoder for ImageEncoderService {
 
         let file = File::open(&encoded_image)?;
         let encoded_bytes = file_to_bytes(file);
-        // Construct the response with the encoded image data
+
         let reply = EncodedImageResponse {
             image_data: encoded_bytes.clone(),
         };
 
-        // Delete the file when done
         std::fs::remove_file(encoded_image)?;
-
         Ok(Response::new(reply))
     }
 }
@@ -107,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let self_id = Uuid::new_v4().to_string();
-    let (tx, mut from_raft) = mpsc::channel(100); // Increased channel buffer capacity
+    let (tx, mut from_raft) = mpsc::channel(100);
 
     println!("Initializing Raft election state for node {}", self_id);
     let (state, tx_to_raft) = RaftElectionState::init(
@@ -124,13 +137,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(raft_election(state));
 
     let is_leader = Arc::new(Mutex::new(false));
+    let election_started = Arc::new(Mutex::new(false)); // Track if election has been triggered
+
     let is_leader_clone = Arc::clone(&is_leader);
 
+    // Listen for leader changes
     tokio::spawn(async move {
         while let Some(message) = from_raft.recv().await {
             match message {
                 Message::ControlLeaderChanged(leader_id) => {
-                    let mut is_leader = is_leader_clone.lock().unwrap();
+                    let mut is_leader = is_leader_clone.lock().await;
                     *is_leader = leader_id == self_id;
                     if *is_leader {
                         println!("Node {} is now the leader", self_id);
@@ -143,9 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Delay node addition to give the election time to initialize
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
+    // Add each node to the cluster with debug logs
     for ip in &node_ips {
         let node_id = Uuid::new_v4().to_string();
         let (node_tx, _node_rx) = mpsc::channel(10);
@@ -160,10 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    sleep(Duration::from_secs(6)).await;
+    sleep(Duration::from_secs(2)).await; // Allow some time for nodes to join the cluster
 
+    // Start the gRPC server with election control
     let addr = format!("{}:50051", local_ip::get().unwrap()).parse()?;
-    let image_encoder_service = ImageEncoderService { is_leader };
+    let image_encoder_service = ImageEncoderService {
+        is_leader,
+        election_started,
+        tx_to_raft,
+    };
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024))
@@ -173,4 +192,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
