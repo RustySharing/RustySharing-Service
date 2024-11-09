@@ -2,16 +2,17 @@ use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 use leader_provider::leader_provider_server::{LeaderProvider, LeaderProviderServer};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 use steganography::util::file_to_bytes;
+use rand::Rng;
 use local_ip_address::local_ip;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// Import your encode_image function
 use rpc_service::image_encoder::encode_image;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -20,6 +21,7 @@ struct EmbeddedData {
     timestamp: String,
 }
 
+// This module is generated from your .proto file
 pub mod image_encoding {
     tonic::include_proto!("image_encoding");
 }
@@ -40,34 +42,25 @@ struct RaftNode {
     term: u64,
     voted_for: Option<String>,
     id: String,
-    encoding_socket: String,
+    encoding_socket: String,  // Socket for client-facing encoding service on port 50051
     timeout_duration: Duration,
     last_heartbeat: Instant,
     peers: Vec<String>,
-    load: u64,
-    load_table: HashMap<String, u64>,
-    current_leader: Option<String>,
+    priority: u64,  // Each node knows only its own priority
 }
 
 impl RaftNode {
-    fn new(id: String, peers: Vec<String>, encoding_socket: String, load: u64) -> Self {
-        let mut load_table = HashMap::new();
-        for peer in &peers {
-            load_table.insert(peer.clone(), u64::MAX);
-        }
-        
+    fn new(id: String, peers: Vec<String>, encoding_socket: String, priority: u64) -> Self {
         RaftNode {
             state: ServerState::Follower,
             term: 0,
             voted_for: None,
             id,
             encoding_socket,
-            timeout_duration: Duration::from_millis(200),
+            timeout_duration: Duration::from_millis(rand::thread_rng().gen_range(150..300)),
             last_heartbeat: Instant::now(),
             peers,
-            load,
-            load_table,
-            current_leader: None,
+            priority,
         }
     }
 
@@ -75,21 +68,15 @@ impl RaftNode {
         self.state = ServerState::Candidate;
         self.term += 1;
         self.voted_for = Some(self.id.clone());
+        println!("Node {} with priority {} is starting an election for term {}", self.id, self.priority, self.term);
 
-        println!("Node {} with load {} is starting an election for term {}", self.id, self.load, self.term);
-
-        self.load_table.insert(self.id.clone(), self.load);
+        let mut votes = 1;
 
         for peer in &self.peers {
-            match request_vote(peer, self.term, &self.id, self.load).await {
-                Ok((vote_granted, peer_load, peer_socket)) => {
-                    self.load_table.insert(peer.clone(), peer_load);
-
-                    if vote_granted && peer_load < self.load {
-                        println!("Node {} is giving up leadership to {} with lower load {}", self.id, peer_socket, peer_load);
-                        self.state = ServerState::Follower;
-                        let _ = confirm_leadership(&peer_socket).await;
-                        return peer_socket;
+            match request_vote(peer, self.term, &self.id, self.priority).await {
+                Ok(vote_granted) => {
+                    if vote_granted {
+                        votes += 1;
                     }
                 }
                 Err(e) => {
@@ -98,36 +85,30 @@ impl RaftNode {
             }
         }
 
-        println!("Node {} Load Table After Election: {:?}", self.id, self.load_table);
-
-        println!("Node {} is elected as the leader with load {}", self.id, self.load);
-        self.state = ServerState::Leader;
-        self.current_leader = Some(self.encoding_socket.clone());
-
-        for peer in &self.peers {
-            let _ = notify_leader(peer, &self.encoding_socket).await;
+        if votes > self.peers.len() / 2 {
+            println!("Node {} is elected as the leader!", self.id);
+            self.state = ServerState::Leader;
+            return self.encoding_socket.clone(); // Return encoding socket on successful election
+        } else {
+            println!("Node {} failed to become the leader", self.id);
+            self.state = ServerState::Follower;
+            return "No leader elected".to_string();
         }
-
-        self.encoding_socket.clone()
     }
 
+    // Method to check if the current node is the leader
     fn is_leader(&self) -> bool {
         self.state == ServerState::Leader
     }
 }
 
-// Function to send a vote request to another peer, including the candidate's load
-async fn request_vote(
-    peer_ip: &str,
-    term: u64,
-    candidate_id: &str,
-    candidate_load: u64,
-) -> Result<(bool, u64, String), Box<dyn std::error::Error + Send + Sync>> {
+// Function to send a vote request to another peer
+async fn request_vote(peer_ip: &str, term: u64, candidate_id: &str, candidate_priority: u64) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
     let request = VoteRequest {
         term,
         candidate_id: candidate_id.to_string(),
-        candidate_load,
+        priority: candidate_priority,  // Include priority
     };
     let request_bytes = serde_json::to_vec(&request)?;
     stream.write_all(&request_bytes).await?;
@@ -135,51 +116,19 @@ async fn request_vote(
     let mut buffer = [0; 128];
     let n = stream.read(&mut buffer).await?;
     let response: VoteResponse = serde_json::from_slice(&buffer[..n])?;
-    Ok((response.vote_granted, response.node_load, response.encoding_socket))
-}
-
-// Function to confirm a new leader
-async fn confirm_leadership(leader_socket: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut stream = TcpStream::connect(format!("{}:6000", leader_socket)).await?;
-    let confirmation = LeaderConfirmation { is_leader: true };
-    let confirmation_bytes = serde_json::to_vec(&confirmation)?;
-    stream.write_all(&confirmation_bytes).await?;
-    Ok(())
-}
-
-// Function to notify peers of the new leader
-async fn notify_leader(peer_ip: &str, leader_socket: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
-    let notification = LeaderNotification {
-        leader_socket: leader_socket.to_string(),
-    };
-    let notification_bytes = serde_json::to_vec(&notification)?;
-    stream.write_all(&notification_bytes).await?;
-    Ok(())
+    Ok(response.vote_granted)
 }
 
 #[derive(Serialize, Deserialize)]
 struct VoteRequest {
     term: u64,
     candidate_id: String,
-    candidate_load: u64,
+    priority: u64,  // Add priority to the VoteRequest struct
 }
 
 #[derive(Serialize, Deserialize)]
 struct VoteResponse {
     vote_granted: bool,
-    node_load: u64,
-    encoding_socket: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LeaderNotification {
-    leader_socket: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LeaderConfirmation {
-    is_leader: bool,
 }
 
 async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -193,44 +142,25 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
         tokio::spawn(async move {
             let mut buffer = [0; 128];
             let n = socket.read(&mut buffer).await.expect("Failed to read data");
+            let vote_request: VoteRequest = serde_json::from_slice(&buffer[..n]).expect("Failed to parse VoteRequest");
 
-            if let Ok(vote_request) = serde_json::from_slice::<VoteRequest>(&buffer[..n]) {
-                let mut raft = raft_clone.lock().await;
-                let vote_granted = if vote_request.term > raft.term {
-                    raft.term = vote_request.term;
-                    raft.voted_for = Some(vote_request.candidate_id.clone());
-                    true
-                } else if vote_request.term == raft.term && vote_request.candidate_load < raft.load {
-                    raft.voted_for = Some(vote_request.candidate_id.clone());
-                    true
-                } else {
-                    false
-                };
+            let mut raft = raft_clone.lock().await;
+            let vote_granted = if vote_request.term > raft.term || (vote_request.term == raft.term && vote_request.priority < raft.priority) {
+                raft.term = vote_request.term;
+                raft.voted_for = Some(vote_request.candidate_id.clone());
+                true
+            } else {
+                false
+            };
 
-                let response = VoteResponse {
-                    vote_granted,
-                    node_load: raft.load,
-                    encoding_socket: raft.encoding_socket.clone(),
-                };
-                let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
-                socket.write_all(&response_bytes).await.expect("Failed to send response");
-            } else if let Ok(leader_notification) = serde_json::from_slice::<LeaderNotification>(&buffer[..n]) {
-                let mut raft = raft_clone.lock().await;
-                raft.current_leader = Some(leader_notification.leader_socket.clone());
-                raft.state = ServerState::Follower;
-                println!("Node {} acknowledged new leader at {}", raft.id, leader_notification.leader_socket);
-            } else if let Ok(leader_confirmation) = serde_json::from_slice::<LeaderConfirmation>(&buffer[..n]) {
-                let mut raft = raft_clone.lock().await;
-                if leader_confirmation.is_leader {
-                    raft.state = ServerState::Leader;
-                    raft.current_leader = Some(raft.encoding_socket.clone());
-                    println!("Node {} is now confirmed as leader", raft.id);
-                }
-            }
+            let response = VoteResponse { vote_granted };
+            let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
+            socket.write_all(&response_bytes).await.expect("Failed to send response");
         });
     }
 }
 
+// Define your ImageEncoderService
 struct ImageEncoderService {
     raft: Arc<Mutex<RaftNode>>,
 }
@@ -298,23 +228,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_ip = local_ip().expect("Could not determine local IP address").to_string();
     let id = format!("{}:6000", local_ip);
 
+    // Set the client-facing encoding service socket on port 50051
     let encoding_socket = format!("{}:50051", local_ip);
-    let all_ips = vec!["10.7.17.128".to_string(), "10.7.16.11".to_string(), "10.7.16.54".to_string()];
+
+    // Each node only knows its own priority
+    let priority = rand::thread_rng().gen_range(1..100);
+
+    let all_ips = vec![
+        "10.7.17.128".to_string(),
+        "10.7.16.11".to_string(),
+    ];
+
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
-    let load = match local_ip.as_str() {
-        "10.7.17.128" => 15,
-        "10.7.16.11" => 20,
-        "10.7.16.54" => 10,
-        _ => 100,
-    };
-
-    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone(), load)));
+    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers, encoding_socket.clone(), priority)));
     tokio::spawn(start_vote_listener(raft_node.clone()));
 
     let addr = encoding_socket.parse()?;
-    let image_encoder_service = ImageEncoderService { raft: raft_node.clone() };
-    let leader_provider_service = LeaderProviderService { raft: raft_node.clone() };
+    let image_encoder_service = ImageEncoderService {
+        raft: raft_node.clone(),
+    };
+    let leader_provider_service = LeaderProviderService {
+        raft: raft_node.clone(),
+    };
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024))
