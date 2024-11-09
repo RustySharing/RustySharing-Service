@@ -24,6 +24,9 @@ local-ip = "0.1.0"
 image = "0.21.3"
 regex = "1.11.1"
 stegano-core = "0.5.3"
+rng = "0.1.0"
+rand = "0.8.5"
+local-ip-address = "0.6.3"
 
 [dependencies.uuid]
 version = "1.11.0"

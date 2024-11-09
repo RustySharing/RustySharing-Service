@@ -1,107 +1,173 @@
-use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
-use image_encoding::{EncodedImageRequest, EncodedImageResponse};
-use leader_provider::leader_provider_server::{LeaderProvider, LeaderProviderServer};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;  // Ensure async-compatible Mutex
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::str;
-use steganography::util::file_to_bytes;
-use tonic::{transport::Server, Request, Response, Status};
-// Import your encode_image function
-use rpc_service::image_encoder::encode_image;
+use local_ip_address::local_ip;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct EmbeddedData {
-    message: String,
-    timestamp: String,
+#[derive(Debug, Clone, PartialEq)]
+enum ServerState {
+    Follower,
+    Candidate,
+    Leader,
 }
 
-// This module is generated from your .proto file
-pub mod image_encoding {
-    tonic::include_proto!("image_encoding");
+struct RaftNode {
+    state: ServerState,
+    term: u64,
+    voted_for: Option<String>,
+    id: String,
+    timeout_duration: Duration,
+    last_heartbeat: Instant,
+    peers: Vec<String>, // List of other servers' IP addresses
 }
 
-pub mod leader_provider {
-    tonic::include_proto!("leader_provider");
-}
+impl RaftNode {
+    fn new(id: String, peers: Vec<String>) -> Self {
+        RaftNode {
+            state: ServerState::Follower,
+            term: 0,
+            voted_for: None,
+            id,
+            timeout_duration: Duration::from_millis(rand::thread_rng().gen_range(150..300)),
+            last_heartbeat: Instant::now(),
+            peers,
+        }
+    }
 
-// Define your ImageEncoderService
-struct ImageEncoderService {}
-struct LeaderProviderService {}
+    async fn handle_election_timeout(&mut self) {
+        if self.state == ServerState::Follower || self.state == ServerState::Candidate {
+            if Instant::now().duration_since(self.last_heartbeat) > self.timeout_duration {
+                println!("Election timeout, starting new election!");
+                self.start_election().await;
+            }
+        }
+    }
 
-#[tonic::async_trait]
-impl LeaderProvider for LeaderProviderService {
-    async fn get_leader(
-        &self,
-        _request: Request<leader_provider::LeaderProviderEmptyRequest>,
-    ) -> Result<Response<leader_provider::LeaderProviderResponse>, Status> {
-        println!("Got a request for a leader provider!");
-        let reply = leader_provider::LeaderProviderResponse {
-            leader_socket: "[::1]".to_string(),
-        };
+    async fn start_election(&mut self) {
+        self.state = ServerState::Candidate;
+        self.term += 1;
+        self.voted_for = Some(self.id.clone());
+        println!("Node {} is starting an election for term {}", self.id, self.term);
 
-        Ok(Response::new(reply))
+        let mut votes = 1; // Start with self-vote
+
+        // Send vote requests to all peers
+        for peer in &self.peers {
+            match request_vote(peer, self.term, &self.id).await {
+                Ok(vote_granted) => {
+                    if vote_granted {
+                        votes += 1;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to request vote from {}: {}", peer, e);
+                }
+            }
+        }
+
+        // If majority vote received, become leader
+        if votes > self.peers.len() / 2 {
+            println!("Node {} is elected as the leader!", self.id);
+            self.state = ServerState::Leader;
+        } else {
+            println!("Node {} failed to become the leader", self.id);
+            self.state = ServerState::Follower;
+        }
     }
 }
 
-#[tonic::async_trait]
-impl ImageEncoder for ImageEncoderService {
-    async fn image_encode(
-        &self,
-        request: Request<EncodedImageRequest>,
-    ) -> Result<Response<EncodedImageResponse>, Status> {
-        let request = request.into_inner();
-        println!("Got a request!");
+// Helper function to send vote requests over TCP
+async fn request_vote(peer_ip: &str, term: u64, candidate_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
+    let request = VoteRequest {
+        term,
+        candidate_id: candidate_id.to_string(),
+    };
+    let request_bytes = serde_json::to_vec(&request)?;
+    stream.write_all(&request_bytes).await?;
 
-        // Get the image data from the request
-        let image_data = &request.image_data; // Assuming image_data is passed as bytes
-        let image_name = &request.file_name;
+    let mut buffer = [0; 128];
+    let n = stream.read(&mut buffer).await?;
+    let response: VoteResponse = serde_json::from_slice(&buffer[..n])?;
+    Ok(response.vote_granted)
+}
 
-        // Step 1: Load the image from the byte data
-        // let img = image::load_from_memory(image_data)
-        //     .map_err(|_| Status::internal("Failed to load image from memory"))?;
+#[derive(Serialize, Deserialize)]
+struct VoteRequest {
+    term: u64,
+    candidate_id: String,
+}
 
-        // Call the encode_image function with the loaded image
-        let encoded_image = match encode_image(image_data.clone(), image_name) {
-            // Pass the loaded image directly
-            Ok(encoded_img_path) => encoded_img_path,
-            Err(e) => {
-                eprintln!("Error encoding image: {}", e);
-                return Err(Status::internal("Image encoding failed"));
-            }
-        };
+#[derive(Serialize, Deserialize)]
+struct VoteResponse {
+    vote_granted: bool,
+}
 
-        let file = File::open(encoded_image.clone())?;
-        let encoded_bytes = file_to_bytes(file);
-        // Construct the response with the encoded image data
-        let reply = EncodedImageResponse {
-            image_data: encoded_bytes.clone(), // Echo the original image data in the response
-        };
+async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let listener = TcpListener::bind("0.0.0.0:6000").await?;
+    println!("Listening for vote requests...");
 
-        // delete file file when done
-        std::fs::remove_file(encoded_image)?;
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        let raft_clone = raft.clone();
 
-        Ok(Response::new(reply))
+        tokio::spawn(async move {
+            let mut buffer = [0; 128];
+            let n = socket.read(&mut buffer).await.expect("Failed to read data");
+            let vote_request: VoteRequest = serde_json::from_slice(&buffer[..n]).expect("Failed to parse VoteRequest");
+
+            let mut raft = raft_clone.lock().await;
+            let vote_granted = if vote_request.term > raft.term {
+                raft.term = vote_request.term;
+                raft.voted_for = Some(vote_request.candidate_id.clone());
+                true
+            } else {
+                false
+            };
+
+            let response = VoteResponse { vote_granted };
+            let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
+            socket.write_all(&response_bytes).await.expect("Failed to send response");
+        });
+    }
+}
+
+async fn run_raft_election_checker(raft: Arc<Mutex<RaftNode>>) {
+    loop {
+        {
+            let mut node = raft.lock().await;
+            node.handle_election_timeout().await;
+        }
+        sleep(Duration::from_millis(100)).await;
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ip = local_ip::get().unwrap();
-    let addr = format!("{}:50051", ip.to_string()).parse()?;
-    //let addr = "[::1]:50051".parse()?;
-    let image_encoder_service = ImageEncoderService {};
+    let local_ip = local_ip().expect("Could not determine local IP address").to_string();
+    let port = 6000;
+    let id = format!("{}:{}", local_ip, port);
 
-    // Server::builder()
-    //     .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
-    //     .add_service(ImageEncoderServer::new(image_encoder_service))
-    //     .serve(addr)
-    //     .await?;
-    Server::builder()
-        .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
-        .add_service(ImageEncoderServer::new(image_encoder_service))
-        .add_service(LeaderProviderServer::new(LeaderProviderService {}))
-        .serve(addr)
-        .await?;
+    let all_ips = vec![
+        "10.7.17.128".to_string(),
+        "10.7.16.11".to_string(),
+        "10.7.16.54".to_string(),
+    ];
 
-    Ok(())
+    let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
+
+    let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers)));
+    let raft_node_clone = raft_node.clone();
+
+    tokio::spawn(start_vote_listener(raft_node.clone()));
+    tokio::spawn(run_raft_election_checker(raft_node_clone));
+
+    println!("Server {} started", id);
+    loop {
+        sleep(Duration::from_secs(1)).await;
+    }
 }
