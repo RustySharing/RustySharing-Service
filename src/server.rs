@@ -1,5 +1,6 @@
 use image_encoding::image_encoder_server::{ ImageEncoder, ImageEncoderServer };
 use image_encoding::{ EncodedImageRequest, EncodedImageResponse };
+use leader_provider::leader_provider_server::{ LeaderProvider, LeaderProviderServer };
 use serde::{ Deserialize, Serialize };
 use std::fs::File;
 use std::str;
@@ -19,8 +20,28 @@ pub mod image_encoding {
   tonic::include_proto!("image_encoding");
 }
 
+pub mod leader_provider {
+  tonic::include_proto!("leader_provider");
+}
+
 // Define your ImageEncoderService
 struct ImageEncoderService {}
+struct LeaderProviderService {}
+
+#[tonic::async_trait]
+impl LeaderProvider for LeaderProviderService {
+  async fn get_leader(
+    &self,
+    _request: Request<leader_provider::LeaderProviderEmptyRequest>
+  ) -> Result<Response<leader_provider::LeaderProviderResponse>, Status> {
+    println!("Got a request for a leader provider!");
+    let reply = leader_provider::LeaderProviderResponse {
+      leader_socket: "[::1]".to_string(),
+    };
+
+    Ok(Response::new(reply))
+  }
+}
 
 #[tonic::async_trait]
 impl ImageEncoder for ImageEncoderService {
@@ -62,13 +83,14 @@ impl ImageEncoder for ImageEncoderService {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let ip = local_ip::get().unwrap();
-  let addr = format!("{}:50051", ip.to_string()).parse()?;
-  //let addr = "[::1]:50051".parse()?;
+  //let addr = format!("{}:50051", ip.to_string()).parse()?;
+  let addr = "[::1]:50051".parse()?;
   let image_encoder_service = ImageEncoderService {};
 
   Server::builder()
     .max_frame_size(Some(10 * 1024 * 1024)) // Set to 10 MB
     .add_service(ImageEncoderServer::new(image_encoder_service))
+    .add_service(LeaderProviderServer::new(LeaderProviderService {}))
     .serve(addr).await?;
 
   Ok(())
