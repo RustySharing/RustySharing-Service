@@ -36,17 +36,17 @@ struct NodeInfo {
     address: String,
     load: f32,
     last_updated: u64,
-    rank: u64, // Used as a tiebreaker and for leader stability
+    rank: u64,
 }
 
 #[derive(Debug)]
 struct LeaderElection {
     nodes: HashMap<String, NodeInfo>,
-    current_leader: Option<String>, // Track current leader for stability
+    current_leader: Option<String>,
     self_address: String,
     known_peers: Vec<String>,
     system: System,
-    self_rank: u64, // Store own rank
+    self_rank: u64,
 }
 
 #[derive(Clone)]
@@ -72,8 +72,12 @@ impl NodeCommunicator for NodeCommunicationService {
         request: Request<LoadUpdate>,
     ) -> Result<Response<LoadUpdateResponse>, Status> {
         let update = request.into_inner();
-        let mut election = self.state.election.lock().await;
+        println!(
+            "DEBUG: Received load update from {}: load={}, rank={}",
+            update.node_address, update.load, update.rank
+        );
 
+        let mut election = self.state.election.lock().await;
         election.update_node(update.node_address, update.load, update.rank);
 
         Ok(Response::new(LoadUpdateResponse {}))
@@ -82,8 +86,12 @@ impl NodeCommunicator for NodeCommunicationService {
 
 impl LeaderElection {
     fn new(self_address: String, known_peers: Vec<String>) -> Self {
-        // Generate a random rank for this node
         let self_rank = rand::thread_rng().gen_range(0..u64::MAX);
+        println!(
+            "DEBUG: Initializing node {} with rank {}",
+            self_address, self_rank
+        );
+        println!("DEBUG: Known peers: {:?}", known_peers);
 
         LeaderElection {
             nodes: HashMap::new(),
@@ -116,6 +124,11 @@ impl LeaderElection {
             .unwrap()
             .as_secs();
 
+        println!(
+            "DEBUG: Updating node {} with load {} and rank {}",
+            address, load, rank
+        );
+
         self.nodes.insert(
             address.clone(),
             NodeInfo {
@@ -125,71 +138,130 @@ impl LeaderElection {
                 rank,
             },
         );
+
+        println!("DEBUG: Current nodes state after update:");
+        for (addr, info) in &self.nodes {
+            println!(
+                "DEBUG: Node {}: load={}, rank={}, last_updated={}",
+                addr, info.load, info.rank, info.last_updated
+            );
+        }
     }
 
     async fn broadcast_load(
         &self,
         load: f32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!(
+            "DEBUG: Broadcasting load {} from node {}",
+            load, self.self_address
+        );
+
         for peer in &self.known_peers {
             if peer != &self.self_address {
-                let mut client =
-                    NodeCommunicatorClient::connect(format!("http://{}", peer)).await?;
+                println!("DEBUG: Sending load update to peer {}", peer);
 
-                let request = Request::new(LoadUpdate {
-                    node_address: self.self_address.clone(),
-                    load,
-                    rank: self.self_rank,
-                });
+                match NodeCommunicatorClient::connect(format!("http://{}", peer)).await {
+                    Ok(mut client) => {
+                        let request = Request::new(LoadUpdate {
+                            node_address: self.self_address.clone(),
+                            load,
+                            rank: self.self_rank,
+                        });
 
-                client.update_load(request).await?;
+                        match client.update_load(request).await {
+                            Ok(_) => println!("DEBUG: Successfully sent load update to {}", peer),
+                            Err(e) => {
+                                println!("DEBUG: Failed to send load update to {}: {}", peer, e)
+                            }
+                        }
+                    }
+                    Err(e) => println!("DEBUG: Failed to connect to peer {}: {}", peer, e),
+                }
             }
         }
         Ok(())
     }
 
     fn elect_leader(&mut self) -> Option<String> {
+        println!("\nDEBUG: Starting leader election process");
+        println!("DEBUG: Current nodes before cleanup:");
+        for (addr, info) in &self.nodes {
+            println!(
+                "DEBUG: Node {}: load={}, rank={}, last_updated={}",
+                addr, info.load, info.rank, info.last_updated
+            );
+        }
+
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // Remove stale nodes (not updated in last 10 seconds)
-        self.nodes
-            .retain(|_, info| current_time - info.last_updated < 10);
+        // Remove stale nodes
+        let stale_threshold = 10; // 10 seconds
+        self.nodes.retain(|addr, info| {
+            let is_fresh = current_time - info.last_updated < stale_threshold;
+            if !is_fresh {
+                println!("DEBUG: Removing stale node {}", addr);
+            }
+            is_fresh
+        });
 
-        let current_load = self.get_current_load();
+        println!("DEBUG: Nodes after cleanup:");
+        for (addr, info) in &self.nodes {
+            println!(
+                "DEBUG: Node {}: load={}, rank={}, last_updated={}",
+                addr, info.load, info.rank, info.last_updated
+            );
+        }
 
         // Add self to the nodes if not already present
         if !self.nodes.contains_key(&self.self_address) {
+            println!("DEBUG: Adding self to nodes list");
+            let current_load = self.get_current_load();
             self.update_node(self.self_address.clone(), current_load, self.self_rank);
         }
 
-        // Find the node with minimum load
-        // If loads are equal, use rank as tiebreaker
-        // If current leader is within acceptable load difference, maintain leadership
-        const LOAD_THRESHOLD: f32 = 10.0; // 10% load difference threshold
+        const LOAD_THRESHOLD: f32 = 10.0;
 
+        // Find node with minimum load
         let min_load_node = self
             .nodes
             .values()
             .min_by(|a, b| {
-                match a.load.partial_cmp(&b.load).unwrap() {
-                    std::cmp::Ordering::Equal => b.rank.cmp(&a.rank), // Higher rank wins
-                    other => other,
+                let comp = a.load.partial_cmp(&b.load).unwrap();
+                println!(
+                    "DEBUG: Comparing nodes {} (load={}, rank={}) and {} (load={}, rank={})",
+                    a.address, a.load, a.rank, b.address, b.load, b.rank
+                );
+                match comp {
+                    std::cmp::Ordering::Equal => {
+                        println!("DEBUG: Loads are equal, comparing ranks");
+                        b.rank.cmp(&a.rank) // Higher rank wins
+                    }
+                    other => {
+                        println!("DEBUG: Loads are different, selecting lower load");
+                        other
+                    }
                 }
             })
             .map(|node| node.address.clone());
 
         // Leadership stability logic
         if let Some(current_leader) = self.current_leader.as_ref() {
+            println!("DEBUG: Current leader is {}", current_leader);
             if let (Some(current_info), Some(min_load_info)) = (
                 self.nodes.get(current_leader),
                 min_load_node.as_ref().and_then(|addr| self.nodes.get(addr)),
             ) {
-                // If current leader's load is within threshold of minimum load, keep current leader
-                if (current_info.load - min_load_info.load).abs() <= LOAD_THRESHOLD {
-                    println!("Maintaining current leader due to load threshold");
+                let load_diff = (current_info.load - min_load_info.load).abs();
+                println!(
+                    "DEBUG: Load difference between current leader and minimum load node: {}",
+                    load_diff
+                );
+                if load_diff <= LOAD_THRESHOLD {
+                    println!("DEBUG: Maintaining current leader due to load threshold");
                     return Some(current_leader.clone());
                 }
             }
@@ -197,6 +269,7 @@ impl LeaderElection {
 
         // Update current leader
         self.current_leader = min_load_node.clone();
+        println!("DEBUG: New leader elected: {:?}", self.current_leader);
         min_load_node
     }
 
@@ -230,33 +303,36 @@ impl LeaderProvider for LeaderProviderService {
         &self,
         _request: Request<leader_provider::LeaderProviderEmptyRequest>,
     ) -> Result<Response<leader_provider::LeaderProviderResponse>, Status> {
-        println!("Got a request for a leader provider!");
+        println!("\nDEBUG: Got a request for a leader provider!");
 
         let mut election = self.state.election.lock().await;
 
-        // Get current load
         let current_load = election.get_current_load();
         let self_address = election.self_address.clone();
         let self_rank = election.self_rank;
 
-        // Update own node info
+        println!(
+            "DEBUG: Current node {} status - load: {}, rank: {}",
+            self_address, current_load, self_rank
+        );
+
         election.update_node(self_address.clone(), current_load, self_rank);
 
-        // Broadcast load to other nodes
         if let Err(e) = election.broadcast_load(current_load).await {
-            eprintln!("Failed to broadcast load: {}", e);
+            println!("DEBUG: Failed to broadcast load: {}", e);
         }
 
-        // Perform election
         let leader_address = match election.elect_leader() {
             Some(leader) => leader,
-            None => return Err(Status::internal("No available leader")),
+            None => {
+                println!("DEBUG: No leader could be elected!");
+                return Err(Status::internal("No available leader"));
+            }
         };
 
-        // Log detailed election information
         if let Some(leader_info) = election.get_node_info(&leader_address) {
             println!(
-                "Elected leader: {} (load: {:.2}%, rank: {})",
+                "DEBUG: Election result - Leader: {} (load: {:.2}%, rank: {})",
                 leader_address, leader_info.load, leader_info.rank
             );
         }
@@ -265,6 +341,7 @@ impl LeaderProvider for LeaderProviderService {
             leader_socket: leader_address,
         };
 
+        println!("DEBUG: Returning leader response: {}", reply.leader_socket);
         Ok(Response::new(reply))
     }
 }
@@ -314,8 +391,8 @@ impl ImageEncoder for ImageEncoderService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = local_ip::get().unwrap();
     let port = 50051; // You might want to make this configurable
-    let addr = format!("{}:{}", ip.to_string(), port).parse()?;
-    let self_address = format!("{}:{}", ip.to_string(), port);
+    let addr = format!("{}:{}", ip, port).parse()?;
+    let self_address = format!("{}:{}", ip, port);
 
     // List of known peers (you'll need to configure this)
     let known_peers = vec![
