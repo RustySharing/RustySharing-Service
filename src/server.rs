@@ -91,6 +91,7 @@ impl RaftNode {
                     if vote_granted && peer_load < self.load {
                         println!("Node {} is giving up leadership to {} with lower load {}", self.id, peer_socket, peer_load);
                         self.state = ServerState::Follower;
+                        let _ = confirm_leadership(&peer_socket).await; // Confirm the peer as leader
                         return peer_socket;
                     }
                 }
@@ -143,6 +144,15 @@ async fn request_vote(
     Ok((response.vote_granted, response.node_load, response.encoding_socket))
 }
 
+// Function to confirm a new leader
+async fn confirm_leadership(leader_socket: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = TcpStream::connect(format!("{}:6000", leader_socket)).await?;
+    let confirmation = LeaderConfirmation { is_leader: true };
+    let confirmation_bytes = serde_json::to_vec(&confirmation)?;
+    stream.write_all(&confirmation_bytes).await?;
+    Ok(())
+}
+
 // Function to notify peers of the new leader
 async fn notify_leader(peer_ip: &str, leader_socket: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
@@ -171,6 +181,11 @@ struct VoteResponse {
 #[derive(Serialize, Deserialize)]
 struct LeaderNotification {
     leader_socket: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LeaderConfirmation {
+    is_leader: bool,
 }
 
 async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -210,8 +225,13 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
                 raft.current_leader = Some(leader_notification.leader_socket.clone());
                 raft.state = ServerState::Follower;
                 println!("Node {} acknowledged new leader at {}", raft.id, leader_notification.leader_socket);
+            } else if let Ok(leader_confirmation) = serde_json::from_slice::<LeaderConfirmation>(&buffer[..n]) {
+                let mut raft = raft_clone.lock().await;
+                if leader_confirmation.is_leader {
+                    raft.state = ServerState::Leader;
+                    println!("Node {} is now confirmed as leader", raft.id);
+                }
             }
-            
         });
     }
 }
@@ -284,12 +304,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = format!("{}:6000", local_ip);
 
     let encoding_socket = format!("{}:50051", local_ip);
-    let all_ips = vec!["10.7.17.128".to_string(), "10.7.16.11".to_string()];
+    let all_ips = vec!["10.7.17.128".to_string(), "10.7.16.11".to_string(), "10.7.16.54".to_string()];
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
     let load = match local_ip.as_str() {
         "10.7.17.128" => 15,
         "10.7.16.11" => 20,
+        "10.7.16.54" => 10,
         _ => 100,
     };
 
