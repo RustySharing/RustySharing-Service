@@ -44,16 +44,16 @@ struct RaftNode {
     timeout_duration: Duration,
     last_heartbeat: Instant,
     peers: Vec<String>,
-    load: u64, // Initial hard-coded load for each node
-    load_table: HashMap<String, u64>, // Table to maintain the load of each peer
-    current_leader: Option<String>, // Track the current leader
+    load: u64,
+    load_table: HashMap<String, u64>,
+    current_leader: Option<String>,
 }
 
 impl RaftNode {
     fn new(id: String, peers: Vec<String>, encoding_socket: String, load: u64) -> Self {
         let mut load_table = HashMap::new();
         for peer in &peers {
-            load_table.insert(peer.clone(), u64::MAX); // Initialize with high load
+            load_table.insert(peer.clone(), u64::MAX);
         }
         
         RaftNode {
@@ -78,20 +78,17 @@ impl RaftNode {
 
         println!("Node {} with load {} is starting an election for term {}", self.id, self.load, self.term);
 
-        // Update own load in load_table for consistency
         self.load_table.insert(self.id.clone(), self.load);
 
         for peer in &self.peers {
             match request_vote(peer, self.term, &self.id, self.load).await {
                 Ok((vote_granted, peer_load, peer_socket)) => {
-                    // Update load table with the received peer load
                     self.load_table.insert(peer.clone(), peer_load);
 
-                    // Check if the peer has a lower load and received the vote
                     if vote_granted && peer_load < self.load {
                         println!("Node {} is giving up leadership to {} with lower load {}", self.id, peer_socket, peer_load);
                         self.state = ServerState::Follower;
-                        let _ = confirm_leadership(&peer_socket).await; // Confirm the peer as leader
+                        let _ = confirm_leadership(&peer_socket).await;
                         return peer_socket;
                     }
                 }
@@ -101,15 +98,12 @@ impl RaftNode {
             }
         }
 
-        // Print the updated load table after collecting votes
         println!("Node {} Load Table After Election: {:?}", self.id, self.load_table);
 
-        // If no peer has a lower load, this node becomes the leader
         println!("Node {} is elected as the leader with load {}", self.id, self.load);
         self.state = ServerState::Leader;
         self.current_leader = Some(self.encoding_socket.clone());
 
-        // Notify all peers of the new leader
         for peer in &self.peers {
             let _ = notify_leader(peer, &self.encoding_socket).await;
         }
@@ -229,6 +223,7 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
                 let mut raft = raft_clone.lock().await;
                 if leader_confirmation.is_leader {
                     raft.state = ServerState::Leader;
+                    raft.current_leader = Some(raft.encoding_socket.clone());
                     println!("Node {} is now confirmed as leader", raft.id);
                 }
             }
@@ -267,7 +262,7 @@ impl ImageEncoder for ImageEncoderService {
         request: Request<EncodedImageRequest>,
     ) -> Result<Response<EncodedImageResponse>, Status> {
         let raft = self.raft.lock().await;
-        if raft.current_leader.as_deref() != Some(&raft.encoding_socket) {
+        if !raft.is_leader() {
             return Err(Status::failed_precondition("This server is not the leader."));
         }
 
