@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use steganography::util::file_to_bytes;
 use sysinfo::System;
 use tokio::sync::Mutex;
+use tokio::time::interval;
+use tokio::time::Duration;
 // use tokio::time::{sleep, Duration};
 use tonic::{transport::Server, Request, Response, Status};
 // Import your encode_image function
@@ -281,11 +283,28 @@ impl LeaderElection {
 impl LeaderProviderService {
     pub fn new(self_address: String, known_peers: Vec<String>) -> Self {
         let election = LeaderElection::new(self_address, known_peers);
-        LeaderProviderService {
-            state: LeaderState {
-                election: Arc::new(Mutex::new(election)),
-            },
-        }
+        let state = LeaderState {
+            election: Arc::new(Mutex::new(election)),
+        };
+
+        // Start periodic load broadcast
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(5)); // Broadcast every 5 seconds
+
+            loop {
+                interval.tick().await;
+                let mut election = state_clone.election.lock().await;
+
+                println!("DEBUG: Periodic load broadcast triggered");
+                let current_load = election.get_current_load();
+                if let Err(e) = election.broadcast_load(current_load).await {
+                    println!("DEBUG: Failed to broadcast load periodically: {}", e);
+                }
+            }
+        });
+
+        LeaderProviderService { state }
     }
 }
 
@@ -390,21 +409,27 @@ impl ImageEncoder for ImageEncoderService {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = local_ip::get().unwrap();
-    let port = 50051; // You might want to make this configurable
-    let addr = format!("{}:{}", ip, port).parse()?;
-    let self_address = format!("{}:{}", ip, port);
+    let port = std::env::var("PORT").unwrap_or_else(|_| "50051".to_string());
+    let addr = format!("{}:{}", ip.to_string(), port).parse()?;
+    let self_address = format!("{}:{}", ip.to_string(), port);
 
-    // List of known peers (you'll need to configure this)
-    let known_peers = vec![
-        "10.7.17.128:50051".to_string(),
-        "10.7.16.11:50051".to_string(),
-        "10.7.16.54:50051".to_string(),
-    ];
+    println!("DEBUG: Starting server on {}", addr);
+
+    // Configure known peers from environment or config file
+    let known_peers = std::env::var("KNOWN_PEERS")
+        .map(|peers| peers.split(',').map(String::from).collect())
+        .unwrap_or_else(|_| {
+            vec![
+                "10.7.17.128:50051".to_string(),
+                "10.7.16.11:50051".to_string(),
+                "10.7.16.54:50051".to_string(),
+            ]
+        });
+
+    println!("DEBUG: Known peers: {:?}", known_peers);
 
     let image_encoder_service = ImageEncoderService {};
     let leader_provider_service = LeaderProviderService::new(self_address.clone(), known_peers);
-
-    // Share state between services
     let node_communication_service =
         NodeCommunicationService::new(leader_provider_service.state.clone());
 
