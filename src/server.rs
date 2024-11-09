@@ -53,6 +53,7 @@ struct LeaderProviderService {
 
 struct ImageEncoderService {}
 
+#[derive(Clone)]
 struct LeaderState {
     election: Arc<Mutex<LeaderElection>>,
 }
