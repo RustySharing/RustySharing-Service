@@ -6,7 +6,6 @@ use std::fs::File;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use tonic::{transport::Server, Request, Response, Status};
 use steganography::util::file_to_bytes;
 use rand::Rng;
@@ -45,7 +44,7 @@ struct RaftNode {
     id: String,
     timeout_duration: Duration,
     last_heartbeat: Instant,
-    peers: Vec<String>, // List of other servers' IP addresses
+    peers: Vec<String>,
 }
 
 impl RaftNode {
@@ -61,22 +60,13 @@ impl RaftNode {
         }
     }
 
-    async fn handle_election_timeout(&mut self) {
-        if self.state == ServerState::Follower || self.state == ServerState::Candidate {
-            if Instant::now().duration_since(self.last_heartbeat) > self.timeout_duration {
-                println!("Election timeout, starting new election!");
-                self.start_election().await;
-            }
-        }
-    }
-
-    async fn start_election(&mut self) {
+    async fn start_election(&mut self) -> String {
         self.state = ServerState::Candidate;
         self.term += 1;
         self.voted_for = Some(self.id.clone());
         println!("Node {} is starting an election for term {}", self.id, self.term);
 
-        let mut votes = 1; // Start with self-vote
+        let mut votes = 1;
 
         for peer in &self.peers {
             match request_vote(peer, self.term, &self.id).await {
@@ -94,17 +84,21 @@ impl RaftNode {
         if votes > self.peers.len() / 2 {
             println!("Node {} is elected as the leader!", self.id);
             self.state = ServerState::Leader;
+            return self.id.clone();
         } else {
             println!("Node {} failed to become the leader", self.id);
             self.state = ServerState::Follower;
+            return "No leader elected".to_string();
         }
     }
 
+    // Method to check if the current node is the leader
     fn is_leader(&self) -> bool {
         self.state == ServerState::Leader
     }
 }
 
+// Function to send a vote request to another peer
 async fn request_vote(peer_ip: &str, term: u64, candidate_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
     let request = VoteRequest {
@@ -160,16 +154,6 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
     }
 }
 
-async fn run_raft_election_checker(raft: Arc<Mutex<RaftNode>>) {
-    loop {
-        {
-            let mut node = raft.lock().await;
-            node.handle_election_timeout().await;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
 // Define your ImageEncoderService
 struct ImageEncoderService {
     raft: Arc<Mutex<RaftNode>>,
@@ -185,12 +169,8 @@ impl LeaderProvider for LeaderProviderService {
         &self,
         _request: Request<leader_provider::LeaderProviderEmptyRequest>,
     ) -> Result<Response<leader_provider::LeaderProviderResponse>, Status> {
-        let raft = self.raft.lock().await;
-        let leader_socket = if raft.is_leader() {
-            raft.id.clone()
-        } else {
-            "No leader available".to_string()
-        };
+        let mut raft = self.raft.lock().await;
+        let leader_socket = raft.start_election().await;
 
         let reply = leader_provider::LeaderProviderResponse {
             leader_socket,
@@ -251,10 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
 
     let raft_node = Arc::new(Mutex::new(RaftNode::new(id.clone(), peers)));
-    let raft_node_clone = raft_node.clone();
-
     tokio::spawn(start_vote_listener(raft_node.clone()));
-    tokio::spawn(run_raft_election_checker(raft_node_clone));
 
     let addr = format!("{}:50051", local_ip).parse()?;
     let image_encoder_service = ImageEncoderService {
