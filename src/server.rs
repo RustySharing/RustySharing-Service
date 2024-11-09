@@ -78,13 +78,15 @@ impl RaftNode {
         // Generate a new priority for this election
         self.generate_priority();
 
-        let mut votes = 1;
+        let mut min_priority = self.priority;
+        let mut leader_socket = self.encoding_socket.clone();
 
         for peer in &self.peers {
             match request_vote(peer, self.term, &self.id, self.priority).await {
-                Ok((vote_granted, peer_priority)) => {
-                    if vote_granted && peer_priority > self.priority {
-                        votes += 1;
+                Ok((vote_granted, peer_priority, peer_socket)) => {
+                    if vote_granted && peer_priority < min_priority {
+                        min_priority = peer_priority;
+                        leader_socket = peer_socket;
                     }
                 }
                 Err(e) => {
@@ -93,15 +95,15 @@ impl RaftNode {
             }
         }
 
-        // Elect the node with the lowest priority
-        if votes > self.peers.len() / 2 {
+        // If this node has the lowest priority, it becomes the leader; otherwise, the node with the lowest priority does.
+        if min_priority == self.priority {
             println!("Node {} is elected as the leader with priority {}", self.id, self.priority);
             self.state = ServerState::Leader;
             return self.encoding_socket.clone();
         } else {
-            println!("Node {} failed to become the leader", self.id);
+            println!("Node {} recognized {} as the leader with priority {}", self.id, leader_socket, min_priority);
             self.state = ServerState::Follower;
-            return "No leader elected".to_string();
+            return leader_socket;
         }
     }
 
@@ -116,7 +118,7 @@ async fn request_vote(
     term: u64,
     candidate_id: &str,
     candidate_priority: u64,
-) -> Result<(bool, u64), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(bool, u64, String), Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = TcpStream::connect(format!("{}:6000", peer_ip)).await?;
     let request = VoteRequest {
         term,
@@ -129,7 +131,7 @@ async fn request_vote(
     let mut buffer = [0; 128];
     let n = stream.read(&mut buffer).await?;
     let response: VoteResponse = serde_json::from_slice(&buffer[..n])?;
-    Ok((response.vote_granted, response.node_priority))
+    Ok((response.vote_granted, response.node_priority, response.encoding_socket))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,7 +144,8 @@ struct VoteRequest {
 #[derive(Serialize, Deserialize)]
 struct VoteResponse {
     vote_granted: bool,
-    node_priority: u64, // Include the node's priority in the response
+    node_priority: u64,    // Include the node's priority in the response
+    encoding_socket: String, // Include the encoding socket for leader identification
 }
 
 async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -175,6 +178,7 @@ async fn start_vote_listener(raft: Arc<Mutex<RaftNode>>) -> Result<(), Box<dyn s
             let response = VoteResponse {
                 vote_granted,
                 node_priority: raft.priority,
+                encoding_socket: raft.encoding_socket.clone(),
             };
             let response_bytes = serde_json::to_vec(&response).expect("Failed to serialize VoteResponse");
             socket.write_all(&response_bytes).await.expect("Failed to send response");
@@ -255,7 +259,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let all_ips = vec![
         "10.7.17.128".to_string(),
         "10.7.16.11".to_string(),
-        "10.7.16.54".to_string(),
     ];
 
     let peers: Vec<String> = all_ips.into_iter().filter(|ip| ip != &local_ip).collect();
