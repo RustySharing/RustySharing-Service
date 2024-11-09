@@ -255,6 +255,12 @@ impl LeaderElection {
             })
             .map(|node| node.address.clone())
     }
+
+    fn update_self_load(&mut self) -> f32 {
+        let current_load = self.get_current_load();
+        self.update_node(self.self_address.clone(), current_load, self.self_rank);
+        current_load
+    }
 }
 
 impl LeaderProviderService {
@@ -264,21 +270,35 @@ impl LeaderProviderService {
             election: Arc::new(Mutex::new(election)),
         };
 
+        // Start periodic self-update and broadcast task
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(5));
+            let mut interval = interval(Duration::from_secs(1)); // Update every second
 
             loop {
                 interval.tick().await;
                 let mut election = state_clone.election.lock().await;
-                println!("DEBUG: Periodic load broadcast triggered");
-                let current_load = election.get_current_load();
 
-                if let Err(e) = election.broadcast_load(current_load).await {
-                    eprintln!("ERROR: Failed to broadcast load periodically: {}", e);
+                // Update own load
+                let current_load = election.update_self_load();
+                println!(
+                    "DEBUG: Updated self node with current load {}",
+                    current_load
+                );
+
+                // Every 5 seconds, broadcast to peers
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                if timestamp % 5 == 0 {
+                    println!("DEBUG: Periodic load broadcast triggered");
+                    if let Err(e) = election.broadcast_load(current_load).await {
+                        eprintln!("ERROR: Failed to broadcast load periodically: {}", e);
+                    }
                 }
 
-                // Drop the lock explicitly
                 drop(election);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -299,7 +319,6 @@ impl LeaderProviderService {
                         addr, info.load, info.rank, info.last_updated
                     );
                 }
-                // Drop the lock explicitly
                 drop(election);
             }
         });
@@ -326,17 +345,14 @@ impl LeaderProvider for LeaderProviderService {
 
         let mut election = self.state.election.lock().await;
 
-        let current_load = election.get_current_load();
-        let self_address = election.self_address.clone();
-        let self_rank = election.self_rank;
-
+        // Update own load before making decision
+        let current_load = election.update_self_load();
         println!(
             "DEBUG: Current node {} status - load: {}, rank: {}",
-            self_address, current_load, self_rank
+            election.self_address, current_load, election.self_rank
         );
 
-        election.update_node(self_address.clone(), current_load, self_rank);
-
+        // Broadcast current load to peers
         if let Err(e) = election.broadcast_load(current_load).await {
             println!("DEBUG: Failed to broadcast load: {}", e);
         }
@@ -348,6 +364,13 @@ impl LeaderProvider for LeaderProviderService {
                 return Err(Status::internal("No available leader"));
             }
         };
+
+        if let Some(leader_info) = election.nodes.get(&leader_address) {
+            println!(
+                "DEBUG: Election result - Leader: {} (load: {:.2}%, rank: {})",
+                leader_address, leader_info.load, leader_info.rank
+            );
+        }
 
         let reply = leader_provider::LeaderProviderResponse {
             leader_socket: leader_address.clone(),
