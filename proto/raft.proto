@@ -13,6 +13,15 @@ message VoteResponse {
   bool vote_granted = 1;
 }
 
+message ElectLeaderRequest {
+  // Empty request or include any needed fields here
+}
+
+message ElectLeaderResponse {
+  string message = 1; // Response message indicating the leader or election result
+}
+
 service RaftService {
   rpc RequestVote (VoteRequest) returns (VoteResponse);
+  rpc ElectLeader (ElectLeaderRequest) returns (ElectLeaderResponse); // New RPC for triggering leader election
 }

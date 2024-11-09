@@ -1,14 +1,9 @@
 use tonic::{transport::Server, Request, Response, Status};
 use std::collections::HashMap;
-use std::fs::{File, read};
-use serde::{Deserialize, Serialize};
 use rand::Rng;
 use std::time::Duration;
 use tokio::time::sleep;
-
-pub mod image_encoding {
-    tonic::include_proto!("image_encoding");
-}
+use std::sync::{Arc, Mutex};
 
 pub mod raft {
     tonic::include_proto!("raft");
@@ -38,13 +33,6 @@ async fn start_raft_election(node: &mut RaftNode) {
 
         let mut votes_received: HashMap<String, bool> = HashMap::new();
         let peers = &node.peers;
-        
-        let vote_request = raft::VoteRequest {
-            candidate_id: node.id.clone(),
-            term: node.term as i32,
-            last_log_index: 0,
-            last_log_term: 0,
-        };
 
         for peer in peers {
             if rand::random::<f32>() < 0.5 {
@@ -71,45 +59,46 @@ async fn start_raft_election(node: &mut RaftNode) {
     }
 }
 
-#[derive(Default)]
-pub struct MyService;
-
-#[tonic::async_trait]
-impl image_encoding::image_encoder_server::ImageEncoder for MyService {
-    async fn image_encode(
-        &self,
-        request: Request<image_encoding::EncodedImageRequest>,
-    ) -> Result<Response<image_encoding::EncodedImageResponse>, Status> {
-        let request = request.into_inner();
-        println!("Got a request to encode image!");
-
-        let image_data = &request.image_data;
-        let image_name = &request.file_name;
-
-        let encoded_image = match encode_image(image_data.clone(), image_name) {
-            Ok(encoded_img_path) => encoded_img_path,
-            Err(e) => {
-                eprintln!("Error encoding image: {}", e);
-                return Err(Status::internal("Image encoding failed"));
-            }
-        };
-
-        let encoded_bytes = std::fs::read(&encoded_image)?;
-
-        let reply = image_encoding::EncodedImageResponse {
-            image_data: encoded_bytes,
-        };
-
-        std::fs::remove_file(encoded_image)?;
-
-        Ok(Response::new(reply))
-    }
+pub struct RaftServiceImpl {
+    pub node: Arc<Mutex<RaftNode>>, // Use Arc<Mutex<T>> for internal mutability
 }
 
-fn encode_image(image_data: Vec<u8>, image_name: &str) -> Result<String, std::io::Error> {
-    let encoded_image_path = format!("/tmp/encoded_{}.png", image_name);
-    std::fs::write(&encoded_image_path, image_data)?;
-    Ok(encoded_image_path)
+#[tonic::async_trait]
+impl raft::raft_service_server::RaftService for RaftServiceImpl {
+    async fn elect_leader(
+        &self,
+        _request: Request<raft::ElectLeaderRequest>,
+    ) -> Result<Response<raft::ElectLeaderResponse>, Status> {
+        let mut node = self.node.lock().unwrap().clone(); // Lock and clone the node for mutation
+        start_raft_election(&mut node).await;
+
+        Ok(Response::new(raft::ElectLeaderResponse {
+            message: format!("Leader elected: {}", node.id),
+        }))
+    }
+
+    async fn request_vote(
+        &self,  // Keep &self
+        request: Request<raft::VoteRequest>,
+    ) -> Result<Response<raft::VoteResponse>, Status> {
+        let request = request.into_inner();
+        println!("Received vote request from candidate: {}", request.candidate_id);
+
+        // Lock the node to modify it safely
+        let mut node = self.node.lock().unwrap();
+        
+        // Simple voting logic: approve vote if no current vote or if term is newer
+        let vote_granted = if node.voted_for.is_none() || request.term > node.term as i32 {
+            node.voted_for = Some(request.candidate_id.clone());
+            true
+        } else {
+            false
+        };
+
+        Ok(Response::new(raft::VoteResponse {
+            vote_granted,
+        }))
+    }
 }
 
 #[tokio::main]
@@ -118,9 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("{}:50051", ip.to_string()).parse()?;
 
     let node_id = format!("node-{}", ip.to_string());
-    let mut node = RaftNode {
+    let node = RaftNode {
         id: node_id,
-        state: RaftState::Candidate,
+        state: RaftState::Follower,
         term: 1,
         voted_for: None,
         peers: vec![
@@ -129,11 +118,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     };
 
-    start_raft_election(&mut node).await;
+    let raft_service = RaftServiceImpl { 
+        node: Arc::new(Mutex::new(node)) // Wrap node in Arc<Mutex<T>> here
+    };
 
     Server::builder()
-        .max_frame_size(Some(10 * 1024 * 1024))
-        .add_service(image_encoding::image_encoder_server::ImageEncoderServer::new(MyService {}))
+        .add_service(raft::raft_service_server::RaftServiceServer::new(raft_service))
         .serve(addr)
         .await?;
 
