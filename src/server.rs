@@ -151,13 +151,16 @@ impl LeaderElection {
     }
 
     async fn broadcast_load(
-        &self,
+        &mut self,
         load: f32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!(
             "DEBUG: Broadcasting load {} from node {}",
             load, self.self_address
         );
+
+        let mut failed_nodes = Vec::new();
+        let mut broadcast_errors = Vec::new();
 
         for peer in &self.known_peers {
             if peer != &self.self_address {
@@ -174,26 +177,46 @@ impl LeaderElection {
                         match client.update_load(request).await {
                             Ok(_) => println!("DEBUG: Successfully sent load update to {}", peer),
                             Err(e) => {
-                                println!("DEBUG: Failed to send load update to {}: {}", peer, e)
+                                println!("DEBUG: Failed to send load update to {}: {}", peer, e);
+                                failed_nodes.push(peer.clone());
+                                broadcast_errors.push(format!("Failed to send to {}: {}", peer, e));
                             }
                         }
                     }
-                    Err(e) => println!("DEBUG: Failed to connect to peer {}: {}", peer, e),
+                    Err(e) => {
+                        println!("DEBUG: Failed to connect to peer {}: {}", peer, e);
+                        failed_nodes.push(peer.clone());
+                        broadcast_errors.push(format!("Failed to connect to {}: {}", peer, e));
+                    }
                 }
             }
         }
-        Ok(())
-    }
 
-    fn elect_leader(&mut self) -> Option<String> {
-        println!("\nDEBUG: Starting leader election process");
-        println!("DEBUG: Current nodes before cleanup:");
+        // Remove failed nodes from our nodes list
+        for failed_node in &failed_nodes {
+            if self.nodes.remove(failed_node).is_some() {
+                println!("DEBUG: Removed failed node {} from nodes list", failed_node);
+            }
+        }
+
+        // Print current state after cleanup
+        println!("DEBUG: Current nodes after cleanup:");
         for (addr, info) in &self.nodes {
             println!(
                 "DEBUG: Node {}: load={}, rank={}, last_updated={}",
                 addr, info.load, info.rank, info.last_updated
             );
         }
+
+        if !broadcast_errors.is_empty() {
+            return Err(broadcast_errors.join(", ").into());
+        }
+
+        Ok(())
+    }
+
+    fn elect_leader(&mut self) -> Option<String> {
+        println!("\nDEBUG: Starting leader election process");
 
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -202,15 +225,20 @@ impl LeaderElection {
 
         // Remove stale nodes
         let stale_threshold = 10; // 10 seconds
-        self.nodes.retain(|addr, info| {
-            let is_fresh = current_time - info.last_updated < stale_threshold;
-            if !is_fresh {
-                println!("DEBUG: Removing stale node {}", addr);
-            }
-            is_fresh
-        });
+        let stale_nodes: Vec<String> = self
+            .nodes
+            .iter()
+            .filter(|(_, info)| current_time - info.last_updated >= stale_threshold)
+            .map(|(addr, _)| addr.clone())
+            .collect();
 
-        println!("DEBUG: Nodes after cleanup:");
+        for stale_node in stale_nodes {
+            println!("DEBUG: Removing stale node {}", stale_node);
+            self.nodes.remove(&stale_node);
+        }
+
+        // Print nodes state after cleanup
+        println!("DEBUG: Current nodes after stale cleanup:");
         for (addr, info) in &self.nodes {
             println!(
                 "DEBUG: Node {}: load={}, rank={}, last_updated={}",
@@ -250,33 +278,10 @@ impl LeaderElection {
             })
             .map(|node| node.address.clone());
 
-        // Leadership stability logic
-        if let Some(current_leader) = self.current_leader.as_ref() {
-            println!("DEBUG: Current leader is {}", current_leader);
-            if let (Some(current_info), Some(min_load_info)) = (
-                self.nodes.get(current_leader),
-                min_load_node.as_ref().and_then(|addr| self.nodes.get(addr)),
-            ) {
-                let load_diff = (current_info.load - min_load_info.load).abs();
-                println!(
-                    "DEBUG: Load difference between current leader and minimum load node: {}",
-                    load_diff
-                );
-                if load_diff <= LOAD_THRESHOLD {
-                    println!("DEBUG: Maintaining current leader due to load threshold");
-                    return Some(current_leader.clone());
-                }
-            }
-        }
-
         // Update current leader
         self.current_leader = min_load_node.clone();
         println!("DEBUG: New leader elected: {:?}", self.current_leader);
         min_load_node
-    }
-
-    fn get_node_info(&self, address: &str) -> Option<&NodeInfo> {
-        self.nodes.get(address)
     }
 }
 
@@ -287,10 +292,9 @@ impl LeaderProviderService {
             election: Arc::new(Mutex::new(election)),
         };
 
-        // Start periodic load broadcast
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(5)); // Broadcast every 5 seconds
+            let mut interval = interval(Duration::from_secs(5));
 
             loop {
                 interval.tick().await;
@@ -301,6 +305,9 @@ impl LeaderProviderService {
                 if let Err(e) = election.broadcast_load(current_load).await {
                     println!("DEBUG: Failed to broadcast load periodically: {}", e);
                 }
+
+                // Drop the lock explicitly
+                drop(election);
             }
         });
 
@@ -349,7 +356,8 @@ impl LeaderProvider for LeaderProviderService {
             }
         };
 
-        if let Some(leader_info) = election.get_node_info(&leader_address) {
+        // Get leader info from the nodes HashMap directly
+        if let Some(leader_info) = election.nodes.get(&leader_address) {
             println!(
                 "DEBUG: Election result - Leader: {} (load: {:.2}%, rank: {})",
                 leader_address, leader_info.load, leader_info.rank
@@ -410,8 +418,8 @@ impl ImageEncoder for ImageEncoderService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = local_ip::get().unwrap();
     let port = std::env::var("PORT").unwrap_or_else(|_| "50051".to_string());
-    let addr = format!("{}:{}", ip.to_string(), port).parse()?;
-    let self_address = format!("{}:{}", ip.to_string(), port);
+    let addr = format!("{}:{}", ip, port).parse()?;
+    let self_address = format!("{}:{}", ip, port);
 
     println!("DEBUG: Starting server on {}", addr);
 
