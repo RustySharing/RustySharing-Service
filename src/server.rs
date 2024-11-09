@@ -264,9 +264,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // List of known peers (you'll need to configure this)
     let known_peers = vec![
-        "192.168.1.1:50051".to_string(),
-        "192.168.1.2:50051".to_string(),
-        "192.168.1.3:50051".to_string(),
+        "10.7.17.128:50051".to_string(),
+        "10.7.16.11:50051".to_string(),
+        "10.7.16.54:50051".to_string(),
     ];
 
     let image_encoder_service = ImageEncoderService {};
