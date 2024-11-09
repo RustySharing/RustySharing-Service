@@ -103,12 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_ips = vec![
         "10.7.16.11".to_string(),
         "10.7.17.128".to_string(),
+        "10.7.16.54".to_string(),
     ];
 
     let self_id = Uuid::new_v4().to_string();
-    let (tx, mut from_raft) = mpsc::channel(10);
+    let (tx, mut from_raft) = mpsc::channel(100); // Increased channel buffer capacity
 
-    // Initialize the Raft election state with debug log
     println!("Initializing Raft election state for node {}", self_id);
     let (state, tx_to_raft) = RaftElectionState::init(
         self_id.clone(),
@@ -122,10 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     tokio::spawn(raft_election(state));
+
     let is_leader = Arc::new(Mutex::new(false));
     let is_leader_clone = Arc::clone(&is_leader);
 
-    // Listen for leader changes
     tokio::spawn(async move {
         while let Some(message) = from_raft.recv().await {
             match message {
@@ -143,7 +143,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Add each node to the cluster with debug logs
+    // Delay node addition to give the election time to initialize
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     for ip in &node_ips {
         let node_id = Uuid::new_v4().to_string();
         let (node_tx, _node_rx) = mpsc::channel(10);
@@ -171,3 +173,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
