@@ -1,0 +1,13 @@
+syntax = "proto3";
+package leader_provider;
+
+service LeaderProvider {
+  rpc GetLeader (LeaderProviderEmptyRequest) returns (LeaderProviderResponse);
+}
+
+message LeaderProviderEmptyRequest {
+}
+
+message LeaderProviderResponse {
+  string leader_socket = 1;
+}
