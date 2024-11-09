@@ -1486,6 +1486,7 @@ dependencies = [
 name = "rpc_service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "get_if_addrs",
  "image 0.21.3",
  "local-ip",
