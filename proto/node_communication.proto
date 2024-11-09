@@ -1,0 +1,13 @@
+syntax = "proto3";
+package node_communication;
+
+service NodeCommunicator {
+    rpc UpdateLoad (LoadUpdate) returns (LoadUpdateResponse);
+}
+
+message LoadUpdate {
+    string node_address = 1;
+    float load = 2;
+}
+
+message LoadUpdateResponse {}

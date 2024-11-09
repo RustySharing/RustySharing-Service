@@ -13,6 +13,23 @@ use tonic::{transport::Server, Request, Response, Status};
 // Import your encode_image function
 use rpc_service::image_encoder::encode_image;
 
+pub mod node_communication {
+    tonic::include_proto!("node_communication");
+}
+
+// This module is generated from your .proto file
+pub mod image_encoding {
+    tonic::include_proto!("image_encoding");
+}
+
+pub mod leader_provider {
+    tonic::include_proto!("leader_provider");
+}
+
+use node_communication::node_communicator_client::NodeCommunicatorClient;
+use node_communication::node_communicator_server::{NodeCommunicator, NodeCommunicatorServer};
+use node_communication::{LoadUpdate, LoadUpdateResponse};
+
 #[derive(Clone, Debug)]
 struct NodeInfo {
     address: String,
@@ -26,15 +43,47 @@ struct LeaderElection {
     nodes: HashMap<String, NodeInfo>,
     current_leader: Option<String>,
     self_address: String,
+    known_peers: Vec<String>,
     system: System,
 }
 
+struct LeaderProviderService {
+    state: LeaderState,
+}
+
+struct ImageEncoderService {}
+
+struct LeaderState {
+    election: Arc<Mutex<LeaderElection>>,
+}
+
+// New service for inter-node communication
+struct NodeCommunicationService {
+    state: LeaderState,
+}
+
+#[tonic::async_trait]
+impl NodeCommunicator for NodeCommunicationService {
+    async fn update_load(
+        &self,
+        request: Request<LoadUpdate>,
+    ) -> Result<Response<LoadUpdateResponse>, Status> {
+        let update = request.into_inner();
+        let mut election = self.state.election.lock().await;
+
+        election.update_node(update.node_address, update.load);
+
+        Ok(Response::new(LoadUpdateResponse {}))
+    }
+}
+
 impl LeaderElection {
-    fn new(self_address: String) -> Self {
+    fn new(self_address: String, known_peers: Vec<String>) -> Self {
         LeaderElection {
             nodes: HashMap::new(),
             current_leader: None,
             self_address,
+            known_peers,
             system: System::new_all(),
         }
     }
@@ -51,17 +100,16 @@ impl LeaderElection {
         let memory_load =
             (self.system.used_memory() as f32 / self.system.total_memory() as f32) * 100.0;
 
-        // Combine CPU and memory load with weights
         0.7 * cpu_load + 0.3 * memory_load
     }
 
-    async fn update_node(&mut self, address: String, load: f32) {
+    fn update_node(&mut self, address: String, load: f32) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let rank = (load * 1000.0) as u64 + timestamp % 1000; // Create unique rank based on load and timestamp
+        let rank = (load * 1000.0) as u64 + timestamp % 1000;
 
         self.nodes.insert(
             address.clone(),
@@ -74,8 +122,27 @@ impl LeaderElection {
         );
     }
 
-    async fn elect_leader(&mut self) -> Option<String> {
-        // Remove stale nodes (not updated in last 10 seconds)
+    async fn broadcast_load(
+        &self,
+        load: f32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        for peer in &self.known_peers {
+            if peer != &self.self_address {
+                let mut client =
+                    NodeCommunicatorClient::connect(format!("http://{}", peer)).await?;
+
+                let request = Request::new(LoadUpdate {
+                    node_address: self.self_address.clone(),
+                    load,
+                });
+
+                client.update_load(request).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn elect_leader(&mut self) -> Option<String> {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -84,7 +151,6 @@ impl LeaderElection {
         self.nodes
             .retain(|_, info| current_time - info.last_updated < 10);
 
-        // Find node with minimum load
         self.nodes
             .values()
             .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap())
@@ -92,13 +158,9 @@ impl LeaderElection {
     }
 }
 
-struct LeaderState {
-    election: Arc<Mutex<LeaderElection>>,
-}
-
 impl LeaderProviderService {
-    pub fn new(self_address: String) -> Self {
-        let election = LeaderElection::new(self_address);
+    pub fn new(self_address: String, known_peers: Vec<String>) -> Self {
+        let election = LeaderElection::new(self_address, known_peers);
         LeaderProviderService {
             state: LeaderState {
                 election: Arc::new(Mutex::new(election)),
@@ -107,20 +169,13 @@ impl LeaderProviderService {
     }
 }
 
-// This module is generated from your .proto file
-pub mod image_encoding {
-    tonic::include_proto!("image_encoding");
-}
-
-pub mod leader_provider {
-    tonic::include_proto!("leader_provider");
+impl NodeCommunicationService {
+    pub fn new(state: LeaderState) -> Self {
+        NodeCommunicationService { state }
+    }
 }
 
 // Define your ImageEncoderService
-struct ImageEncoderService {}
-struct LeaderProviderService {
-    state: LeaderState,
-}
 
 #[tonic::async_trait]
 impl LeaderProvider for LeaderProviderService {
@@ -132,13 +187,20 @@ impl LeaderProvider for LeaderProviderService {
 
         let mut election = self.state.election.lock().await;
 
-        // Update own load
+        // Get current load
         let current_load = election.get_current_load();
         let self_address = election.self_address.clone();
-        election.update_node(self_address, current_load).await;
 
-        // Trigger election
-        let leader_address = match election.elect_leader().await {
+        // Update own node info
+        election.update_node(self_address.clone(), current_load);
+
+        // Broadcast load to other nodes
+        if let Err(e) = election.broadcast_load(current_load).await {
+            eprintln!("Failed to broadcast load: {}", e);
+        }
+
+        // Perform election
+        let leader_address = match election.elect_leader() {
             Some(leader) => leader,
             None => return Err(Status::internal("No available leader")),
         };
@@ -195,16 +257,29 @@ impl ImageEncoder for ImageEncoderService {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = local_ip::get().unwrap();
-    let addr = format!("{}:50051", ip.to_string()).parse()?;
-    let self_address = format!("{}:50051", ip.to_string());
+    let port = 50051; // You might want to make this configurable
+    let addr = format!("{}:{}", ip.to_string(), port).parse()?;
+    let self_address = format!("{}:{}", ip.to_string(), port);
+
+    // List of known peers (you'll need to configure this)
+    let known_peers = vec![
+        "192.168.1.1:50051".to_string(),
+        "192.168.1.2:50051".to_string(),
+        "192.168.1.3:50051".to_string(),
+    ];
 
     let image_encoder_service = ImageEncoderService {};
-    let leader_provider_service = LeaderProviderService::new(self_address);
+    let leader_provider_service = LeaderProviderService::new(self_address.clone(), known_peers);
+
+    // Share state between services
+    let node_communication_service =
+        NodeCommunicationService::new(leader_provider_service.state.clone());
 
     Server::builder()
         .max_frame_size(Some(10 * 1024 * 1024))
         .add_service(ImageEncoderServer::new(image_encoder_service))
         .add_service(LeaderProviderServer::new(leader_provider_service))
+        .add_service(NodeCommunicatorServer::new(node_communication_service))
         .serve(addr)
         .await?;
 
