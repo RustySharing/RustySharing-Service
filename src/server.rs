@@ -104,28 +104,41 @@ impl NodeCommunicator for NodeCommunicationService {
                 election.self_address
             );
 
-            // Spawn a thread that will wake up the process after 30 seconds
-            let self_addr = election.self_address.clone();
-            std::thread::spawn(move || {
-                // Use std::process to run a command that sleeps the current process
-                let pid = std::process::id();
-                if cfg!(target_os = "linux") {
-                    // On Linux, use SIGSTOP to pause the process
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGSTOP);
-                    }
-                    // Sleep in a separate thread so the process can still be stopped
-                    std::thread::sleep(Duration::from_secs(30));
-                    // Send SIGCONT to resume the process
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGCONT);
-                    }
-                } else {
-                    // On other platforms, just sleep the thread
-                    std::thread::sleep(Duration::from_secs(30));
-                }
-                println!("Node {} waking up from sleep", self_addr);
-            });
+            // Get current executable path and arguments
+            let current_exe = std::env::current_exe().expect("Failed to get current exe path");
+            let args: Vec<String> = std::env::args().collect();
+
+            // Create a script that will restart the server after 30 seconds
+            let script_content = format!(
+                r#"#!/bin/bash
+sleep 30
+{} {}"#,
+                current_exe.display(),
+                args[1..].join(" ")
+            );
+
+            // Write the script to a temporary file
+            let script_path = std::env::temp_dir().join("restart_server.sh");
+            std::fs::write(&script_path, script_content).expect("Failed to write restart script");
+
+            // Make the script executable
+            std::process::Command::new("chmod")
+                .arg("+x")
+                .arg(&script_path)
+                .output()
+                .expect("Failed to make script executable");
+
+            // Start the restart script in the background
+            std::process::Command::new("bash")
+                .arg(&script_path)
+                .spawn()
+                .expect("Failed to start restart script");
+
+            // Remove the sleeping node from our local list
+            election.nodes.remove(&sleep_command.node_to_sleep);
+
+            // Exit this process - the script will restart it after 30 seconds
+            std::process::exit(0);
         }
 
         // Remove the sleeping node from our local list
