@@ -83,8 +83,56 @@ struct ImageEncoderService {}
 
 // New service for inter-node communication
 
+use crate::node_communication::SleepCommand;
+use crate::node_communication::SleepResponse;
+
 #[tonic::async_trait]
 impl NodeCommunicator for NodeCommunicationService {
+    async fn broadcast_sleep(
+        &self,
+        request: Request<SleepCommand>,
+    ) -> Result<Response<SleepResponse>, Status> {
+        let sleep_command = request.into_inner();
+        let mut election = self.state.election.lock().await;
+
+        // If this node is the one that should sleep
+        if sleep_command.node_to_sleep == election.self_address {
+            debug_print!(
+                election.debug_level,
+                1,
+                "DEBUG: This node ({}) will sleep for 30 seconds",
+                election.self_address
+            );
+
+            // Spawn a thread that will wake up the process after 30 seconds
+            let self_addr = election.self_address.clone();
+            std::thread::spawn(move || {
+                // Use std::process to run a command that sleeps the current process
+                let pid = std::process::id();
+                if cfg!(target_os = "linux") {
+                    // On Linux, use SIGSTOP to pause the process
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGSTOP);
+                    }
+                    // Sleep in a separate thread so the process can still be stopped
+                    std::thread::sleep(Duration::from_secs(30));
+                    // Send SIGCONT to resume the process
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGCONT);
+                    }
+                } else {
+                    // On other platforms, just sleep the thread
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+                println!("Node {} waking up from sleep", self_addr);
+            });
+        }
+
+        // Remove the sleeping node from our local list
+        election.nodes.remove(&sleep_command.node_to_sleep);
+
+        Ok(Response::new(SleepResponse {}))
+    }
     async fn update_load(
         &self,
         request: Request<LoadUpdate>,
@@ -110,6 +158,82 @@ impl NodeCommunicator for NodeCommunicationService {
 }
 
 impl LeaderElection {
+    async fn broadcast_sleep_command(
+        &mut self,
+        node_to_sleep: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug_print!(
+            self.debug_level,
+            1,
+            "DEBUG: Broadcasting sleep command for node {}",
+            node_to_sleep
+        );
+
+        let mut failed_nodes = Vec::new();
+        let mut broadcast_errors = Vec::new();
+
+        for peer in &self.known_peers.clone() {
+            debug_print!(
+                self.debug_level,
+                2,
+                "DEBUG: Sending sleep command to peer {}",
+                peer
+            );
+
+            let timeout_duration = Duration::from_secs(2);
+
+            match tokio::time::timeout(timeout_duration, async {
+                match NodeCommunicatorClient::connect(format!("http://{}", peer)).await {
+                    Ok(mut client) => {
+                        let request = Request::new(SleepCommand {
+                            node_to_sleep: node_to_sleep.clone(),
+                        });
+
+                        client.broadcast_sleep(request).await
+                    }
+                    Err(e) => Err(Status::internal(format!("Failed to connect: {}", e))),
+                }
+            })
+            .await
+            {
+                Ok(Ok(_)) => {
+                    debug_print!(
+                        self.debug_level,
+                        2,
+                        "DEBUG: Successfully sent sleep command to {}",
+                        peer
+                    );
+                }
+                Ok(Err(e)) => {
+                    debug_print!(
+                        self.debug_level,
+                        2,
+                        "DEBUG: Failed to send sleep command to {}: {}",
+                        peer,
+                        e
+                    );
+                    failed_nodes.push(peer.clone());
+                    broadcast_errors.push(format!("Failed to send to {}: {}", peer, e));
+                }
+                Err(_) => {
+                    debug_print!(
+                        self.debug_level,
+                        2,
+                        "DEBUG: Timeout while sending sleep command to {}",
+                        peer
+                    );
+                    failed_nodes.push(peer.clone());
+                    broadcast_errors.push(format!("Timeout while sending to {}", peer));
+                }
+            }
+        }
+
+        if !broadcast_errors.is_empty() {
+            return Err(broadcast_errors.join(", ").into());
+        }
+
+        Ok(())
+    }
     fn new(self_address: String, known_peers: Vec<String>, debug_level: u8) -> Self {
         let self_rank = rand::thread_rng().gen_range(0..u64::MAX);
         debug_print!(
@@ -409,6 +533,33 @@ impl LeaderProviderService {
                         info.last_updated
                     );
                 }
+                drop(election);
+            }
+        });
+
+        let state_failure = state.clone();
+        tokio::spawn(async move {
+            let mut failure_interval = interval(Duration::from_secs(60)); // Run every minute
+
+            loop {
+                failure_interval.tick().await;
+                let mut election = state_failure.election.lock().await;
+
+                // Find the node with the least load
+                if let Some(node_to_fail) = election.elect_leader() {
+                    debug_print!(
+                        election.debug_level,
+                        1,
+                        "DEBUG: Initiating failure simulation for node {}",
+                        node_to_fail
+                    );
+
+                    // Broadcast sleep command to all nodes
+                    if let Err(e) = election.broadcast_sleep_command(node_to_fail.clone()).await {
+                        eprintln!("Error broadcasting sleep command: {}", e);
+                    }
+                }
+
                 drop(election);
             }
         });

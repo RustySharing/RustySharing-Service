@@ -3,6 +3,7 @@ package node_communication;
 
 service NodeCommunicator {
     rpc UpdateLoad (LoadUpdate) returns (LoadUpdateResponse);
+    rpc BroadcastSleep (SleepCommand) returns (SleepResponse);
 }
 
 message LoadUpdate {
@@ -12,3 +13,9 @@ message LoadUpdate {
 }
 
 message LoadUpdateResponse {}
+
+message SleepCommand {
+    string node_to_sleep = 1;
+}
+
+message SleepResponse {}
