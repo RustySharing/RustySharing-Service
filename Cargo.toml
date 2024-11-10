@@ -26,6 +26,7 @@ regex = "1.11.1"
 stegano-core = "0.5.3"
 sysinfo = "0.32.0"
 rand = "0.8.5"
+clap = {version = "4.5.20", features = ["derive"] }
 
 [dependencies.uuid]
 version = "1.11.0"

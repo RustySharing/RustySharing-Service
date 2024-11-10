@@ -1,7 +1,9 @@
+use clap::Parser;
 use image_encoding::image_encoder_server::{ImageEncoder, ImageEncoderServer};
 use image_encoding::{EncodedImageRequest, EncodedImageResponse};
 use leader_provider::leader_provider_server::{LeaderProvider, LeaderProviderServer};
 use rand::Rng;
+use rpc_service::image_encoder::encode_image;
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
@@ -11,10 +13,7 @@ use sysinfo::System;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use tokio::time::Duration;
-// use tokio::time::{sleep, Duration};
 use tonic::{transport::Server, Request, Response, Status};
-// Import your encode_image function
-use rpc_service::image_encoder::encode_image;
 
 pub mod node_communication {
     tonic::include_proto!("node_communication");
@@ -33,6 +32,22 @@ use node_communication::node_communicator_client::NodeCommunicatorClient;
 use node_communication::node_communicator_server::{NodeCommunicator, NodeCommunicatorServer};
 use node_communication::{LoadUpdate, LoadUpdateResponse};
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Debug level: 0 = no debug, 1 = current node state only, 2 = all debug messages
+    #[arg(short, long, default_value_t = 2)]
+    debug_level: u8,
+}
+
+macro_rules! debug_print {
+    ($debug_level:expr, $required_level:expr, $($arg:tt)*) => {
+        if $debug_level >= $required_level {
+            println!($($arg)*);
+        }
+    };
+}
+
 #[derive(Clone, Debug)]
 struct NodeInfo {
     address: String,
@@ -49,6 +64,7 @@ struct LeaderElection {
     known_peers: Vec<String>,
     system: System,
     self_rank: u64,
+    debug_level: u8,
 }
 
 #[derive(Clone)]
@@ -74,9 +90,15 @@ impl NodeCommunicator for NodeCommunicationService {
         request: Request<LoadUpdate>,
     ) -> Result<Response<LoadUpdateResponse>, Status> {
         let update = request.into_inner();
-        println!(
+        let election_debug = self.state.election.lock().await.debug_level;
+
+        debug_print!(
+            election_debug,
+            2,
             "DEBUG: Received load update from {}: load={}, rank={}",
-            update.node_address, update.load, update.rank
+            update.node_address,
+            update.load,
+            update.rank
         );
 
         let mut election = self.state.election.lock().await;
@@ -88,13 +110,16 @@ impl NodeCommunicator for NodeCommunicationService {
 }
 
 impl LeaderElection {
-    fn new(self_address: String, known_peers: Vec<String>) -> Self {
+    fn new(self_address: String, known_peers: Vec<String>, debug_level: u8) -> Self {
         let self_rank = rand::thread_rng().gen_range(0..u64::MAX);
-        println!(
+        debug_print!(
+            debug_level,
+            1,
             "DEBUG: Initializing node {} with rank {}",
-            self_address, self_rank
+            self_address,
+            self_rank
         );
-        println!("DEBUG: Known peers: {:?}", known_peers);
+        debug_print!(debug_level, 2, "DEBUG: Known peers: {:?}", known_peers);
 
         LeaderElection {
             nodes: HashMap::new(),
@@ -103,22 +128,8 @@ impl LeaderElection {
             known_peers,
             system: System::new_all(),
             self_rank,
+            debug_level,
         }
-    }
-
-    fn get_current_load(&mut self) -> f32 {
-        self.system.refresh_cpu_usage();
-        let cpus = self.system.cpus();
-        let mut sum_cpu: f32 = 0.0;
-        for cpu in cpus {
-            sum_cpu += cpu.cpu_usage();
-        }
-        let cpu_load = sum_cpu / cpus.len() as f32;
-        self.system.refresh_memory();
-        let memory_load =
-            (self.system.used_memory() as f32 / self.system.total_memory() as f32) * 100.0;
-
-        0.7 * cpu_load + 0.3 * memory_load
     }
 
     fn update_node(&mut self, address: String, load: f32, rank: u64) {
@@ -127,9 +138,13 @@ impl LeaderElection {
             .unwrap()
             .as_secs();
 
-        println!(
+        debug_print!(
+            self.debug_level,
+            2,
             "DEBUG: Updating node {} with load {} and rank {}",
-            address, load, rank
+            address,
+            load,
+            rank
         );
 
         self.nodes.insert(
@@ -142,11 +157,20 @@ impl LeaderElection {
             },
         );
 
-        println!("DEBUG: Current nodes state after update:");
+        debug_print!(
+            self.debug_level,
+            1,
+            "DEBUG: Current nodes state after update:"
+        );
         for (addr, info) in &self.nodes {
-            println!(
+            debug_print!(
+                self.debug_level,
+                1,
                 "DEBUG: Node {}: load={}, rank={}, last_updated={}",
-                addr, info.load, info.rank, info.last_updated
+                addr,
+                info.load,
+                info.rank,
+                info.last_updated
             );
         }
     }
@@ -155,18 +179,25 @@ impl LeaderElection {
         &mut self,
         load: f32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!(
+        debug_print!(
+            self.debug_level,
+            2,
             "DEBUG: Broadcasting load {} from node {}",
-            load, self.self_address
+            load,
+            self.self_address
         );
 
         let mut failed_nodes = Vec::new();
         let mut broadcast_errors = Vec::new();
 
         for peer in &self.known_peers.clone() {
-            // Clone to avoid borrowing issues
             if peer != &self.self_address {
-                println!("DEBUG: Attempting to send load update to peer {}", peer);
+                debug_print!(
+                    self.debug_level,
+                    2,
+                    "DEBUG: Attempting to send load update to peer {}",
+                    peer
+                );
 
                 let timeout_duration = Duration::from_secs(2);
                 let self_addr = self.self_address.clone();
@@ -189,15 +220,31 @@ impl LeaderElection {
                 .await
                 {
                     Ok(Ok(_)) => {
-                        println!("DEBUG: Successfully sent load update to {}", peer);
+                        debug_print!(
+                            self.debug_level,
+                            2,
+                            "DEBUG: Successfully sent load update to {}",
+                            peer
+                        );
                     }
                     Ok(Err(e)) => {
-                        println!("DEBUG: Failed to send load update to {}: {}", peer, e);
+                        debug_print!(
+                            self.debug_level,
+                            2,
+                            "DEBUG: Failed to send load update to {}: {}",
+                            peer,
+                            e
+                        );
                         failed_nodes.push(peer.clone());
                         broadcast_errors.push(format!("Failed to send to {}: {}", peer, e));
                     }
                     Err(_) => {
-                        println!("DEBUG: Timeout while sending load update to {}", peer);
+                        debug_print!(
+                            self.debug_level,
+                            2,
+                            "DEBUG: Timeout while sending load update to {}",
+                            peer
+                        );
                         failed_nodes.push(peer.clone());
                         broadcast_errors.push(format!("Timeout while sending to {}", peer));
                     }
@@ -205,19 +252,28 @@ impl LeaderElection {
             }
         }
 
-        // Remove failed nodes from our nodes list
+        // Remove failed nodes and print current state
         for failed_node in &failed_nodes {
             if self.nodes.remove(failed_node).is_some() {
-                println!("DEBUG: Removed failed node {} from nodes list", failed_node);
+                debug_print!(
+                    self.debug_level,
+                    2,
+                    "DEBUG: Removed failed node {} from nodes list",
+                    failed_node
+                );
             }
         }
 
-        // Print current state after cleanup
-        println!("DEBUG: Nodes state after broadcast:");
+        debug_print!(self.debug_level, 1, "DEBUG: Nodes state after broadcast:");
         for (addr, info) in &self.nodes {
-            println!(
+            debug_print!(
+                self.debug_level,
+                1,
                 "DEBUG: Node {}: load={}, rank={}, last_updated={}",
-                addr, info.load, info.rank, info.last_updated
+                addr,
+                info.load,
+                info.rank,
+                info.last_updated
             );
         }
 
@@ -226,6 +282,26 @@ impl LeaderElection {
         }
 
         Ok(())
+    }
+    fn get_current_load(&mut self) -> f32 {
+        self.system.refresh_cpu_usage();
+        let cpus = self.system.cpus();
+        let mut sum_cpu: f32 = 0.0;
+        for cpu in cpus {
+            sum_cpu += cpu.cpu_usage();
+        }
+        let cpu_load = sum_cpu / cpus.len() as f32;
+        self.system.refresh_memory();
+        let memory_load =
+            (self.system.used_memory() as f32 / self.system.total_memory() as f32) * 100.0;
+
+        0.7 * cpu_load + 0.3 * memory_load
+    }
+
+    fn update_self_load(&mut self) -> f32 {
+        let current_load = self.get_current_load();
+        self.update_node(self.self_address.clone(), current_load, self.self_rank);
+        current_load
     }
 
     fn elect_leader(&mut self) -> Option<String> {
@@ -238,7 +314,12 @@ impl LeaderElection {
         self.nodes.retain(|_, info| {
             let is_fresh = current_time - info.last_updated < 10;
             if !is_fresh {
-                println!("DEBUG: Node {} is stale, removing", info.address);
+                debug_print!(
+                    self.debug_level,
+                    2,
+                    "DEBUG: Node {} is stale, removing",
+                    info.address
+                );
             }
             is_fresh
         });
@@ -255,17 +336,11 @@ impl LeaderElection {
             })
             .map(|node| node.address.clone())
     }
-
-    fn update_self_load(&mut self) -> f32 {
-        let current_load = self.get_current_load();
-        self.update_node(self.self_address.clone(), current_load, self.self_rank);
-        current_load
-    }
 }
 
 impl LeaderProviderService {
-    pub fn new(self_address: String, known_peers: Vec<String>) -> Self {
-        let election = LeaderElection::new(self_address, known_peers);
+    pub fn new(self_address: String, known_peers: Vec<String>, debug_level: u8) -> Self {
+        let election = LeaderElection::new(self_address, known_peers, debug_level);
         let state = LeaderState {
             election: Arc::new(Mutex::new(election)),
         };
@@ -281,7 +356,9 @@ impl LeaderProviderService {
 
                 // Update own load
                 let current_load = election.update_self_load();
-                println!(
+                debug_print!(
+                    election.debug_level,
+                    2,
                     "DEBUG: Updated self node with current load {}",
                     current_load
                 );
@@ -293,7 +370,11 @@ impl LeaderProviderService {
                     .as_secs();
 
                 if timestamp % 5 == 0 {
-                    println!("DEBUG: Periodic load broadcast triggered");
+                    debug_print!(
+                        election.debug_level,
+                        2,
+                        "DEBUG: Periodic load broadcast triggered"
+                    );
                     if let Err(e) = election.broadcast_load(current_load).await {
                         eprintln!("ERROR: Failed to broadcast load periodically: {}", e);
                     }
@@ -312,11 +393,20 @@ impl LeaderProviderService {
             loop {
                 monitor_interval.tick().await;
                 let election = state_monitor.election.lock().await;
-                println!("DEBUG: Monitor - Current nodes state:");
+                debug_print!(
+                    election.debug_level,
+                    1,
+                    "DEBUG: Monitor - Current nodes state:"
+                );
                 for (addr, info) in &election.nodes {
-                    println!(
+                    debug_print!(
+                        election.debug_level,
+                        1,
                         "DEBUG: Node {}: load={}, rank={}, last_updated={}",
-                        addr, info.load, info.rank, info.last_updated
+                        addr,
+                        info.load,
+                        info.rank,
+                        info.last_updated
                     );
                 }
                 drop(election);
@@ -424,14 +514,16 @@ impl ImageEncoder for ImageEncoderService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let debug_level = args.debug_level;
+
     let ip = local_ip::get().unwrap();
     let port = std::env::var("PORT").unwrap_or_else(|_| "50051".to_string());
     let addr = format!("{}:{}", ip, port).parse()?;
     let self_address = format!("{}:{}", ip, port);
 
-    println!("DEBUG: Starting server on {}", addr);
+    debug_print!(debug_level, 1, "DEBUG: Starting server on {}", addr);
 
-    // Configure known peers from environment or config file
     let known_peers = std::env::var("KNOWN_PEERS")
         .map(|peers| peers.split(',').map(String::from).collect())
         .unwrap_or_else(|_| {
@@ -442,10 +534,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ]
         });
 
-    println!("DEBUG: Known peers: {:?}", known_peers);
+    debug_print!(debug_level, 2, "DEBUG: Known peers: {:?}", known_peers);
 
     let image_encoder_service = ImageEncoderService {};
-    let leader_provider_service = LeaderProviderService::new(self_address.clone(), known_peers);
+    let leader_provider_service =
+        LeaderProviderService::new(self_address.clone(), known_peers, debug_level);
     let node_communication_service =
         NodeCommunicationService::new(leader_provider_service.state.clone());
 
